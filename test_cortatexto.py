@@ -554,6 +554,30 @@ def test_costura_conserta_virgula_dupla():
     assert out == "A casa, foi vendida ontem."
 
 
+def test_encolher_apara_clausula_sem_reticencias():
+    # tem cláusula acessória removivel -> aparo limpo, sem "..." (mecanico=False)
+    txt = "A equipe venceu o jogo, com grande autoridade, ali na capital."
+    out, mecanico = ct._encolher_limpo(txt, 40, 20)
+    assert ct.contar(out) <= 40
+    assert not out.endswith("...")
+    assert mecanico is False
+    assert _subseq_sem_espacos(out, txt)
+
+
+def test_encolher_corta_com_reticencias_sem_estrutura():
+    # sem virgula/frase para aparar -> corte mecanico por palavra com "..."
+    txt = "lorem ipsum dolor sit amet consectetur adipiscing elit sed"
+    out, mecanico = ct._encolher_limpo(txt, 20, 20)
+    assert ct.contar(out) <= 20
+    assert out.endswith("...")
+    assert mecanico is True
+
+
+def test_palavras_alvo_escala_com_limite():
+    assert ct._palavras_alvo(60) >= 8 and ct._palavras_alvo(60) <= 12
+    assert ct._palavras_alvo(6) >= 1
+
+
 def test_corrige_maiuscula_no_inicio():
     # remocao que expoe um novo inicio de frase em minuscula -> deve subir
     txt = "Apesar de tudo, as series de streaming dominaram o ano todo."

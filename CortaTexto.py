@@ -175,29 +175,37 @@ def _prompt_micro_edicao(texto: str, limite: int, minimo: int) -> str:
     )
 
 
+def _palavras_alvo(limite: int) -> int:
+    """Aproxima quantas palavras cabem em `limite` (~6 chars/palavra com espaco).
+    O qwen3 controla contagem de PALAVRAS muito melhor que de caracteres, entao
+    damos essa meta -- decisivo em cortes drasticos (limite pequeno)."""
+    return max(1, round(limite / 6))
+
+
 def _prompt_inicial(texto: str, limite: int, minimo: int) -> str:
     orig = len(texto)
     remover = max(0, orig - limite)
+    palavras = _palavras_alvo(limite)
     return (
-        f"O texto original abaixo tem {orig} caracteres e o limite e {limite}: "
-        f"voce precisa remover apenas cerca de {remover} caracteres. Reescreva-o "
-        f"para ter entre {minimo} e {limite} caracteres, o mais PROXIMO possivel "
-        f"de {limite} sem JAMAIS ultrapassar. Remova SO o menos essencial ate "
-        f"caber -- NAO comprima alem do necessario: mantenha o MAXIMO de conteudo, "
-        f"palavras e construcoes do original. Quanto mais perto de {limite}, "
-        f"melhor.\n\nTEXTO:\n{texto}"
+        f"O texto original abaixo tem {orig} caracteres e o limite e {limite} "
+        f"(cerca de {palavras} palavras). Reescreva-o para ter entre {minimo} e "
+        f"{limite} caracteres -- aproximadamente {palavras} palavras --, o mais "
+        f"PROXIMO possivel de {limite} sem JAMAIS ultrapassar. Mantenha os fatos "
+        f"centrais e o maximo de conteudo que couber; remova so o menos essencial. "
+        f"Responda apenas com o texto.\n\nTEXTO:\n{texto}"
     )
 
 
 def _prompt_encurtar(resumo: str, atual: int, limite: int, minimo: int) -> str:
     excesso = atual - limite
+    palavras = _palavras_alvo(limite)
     return (
         f"O texto abaixo tem {atual} caracteres e ultrapassou o limite em "
-        f"{excesso}. Encurte-o removendo o MENOS essencial e mantendo o restante "
-        f"fiel ao original (sem parafrasear), ate ficar entre {minimo} e {limite} "
-        f"caracteres, o mais PROXIMO possivel de {limite} sem passar. Nao corte "
-        f"mais do que o necessario: fique logo ABAIXO de {limite}, nao bem abaixo. "
-        f"Responda apenas com o novo texto.\n\nTEXTO ATUAL:\n{resumo}"
+        f"{excesso}. Encurte-o ate ficar entre {minimo} e {limite} caracteres "
+        f"(cerca de {palavras} palavras), o mais PROXIMO possivel de {limite} sem "
+        f"passar -- corte palavras supérfluas e detalhes secundarios, mantendo os "
+        f"fatos centrais e sem parafrasear o que ficar. Responda apenas com o novo "
+        f"texto.\n\nTEXTO ATUAL:\n{resumo}"
     )
 
 
@@ -397,6 +405,29 @@ def _nomes_proprios(texto: str) -> set:
     return nomes
 
 
+def _encolher_limpo(texto: str, limite: int, faixa: int) -> tuple:
+    """Reduz `texto` para <= limite da forma MAIS limpa possivel, devolvendo
+    (resultado, mecanico). Tenta, em ordem: (1) aparar clausulas acessorias
+    (`_aparar_para_caber`); (2) terminar numa fronteira de FRASE <= limite; (3)
+    so em ultimo caso, corte por palavra com '...' (`_cortar`, mecanico=True).
+    Os dois primeiros nao truncam no meio de uma frase nem deixam '...'."""
+    if contar(texto) <= limite:
+        return texto, False
+    piso = max(1, limite // 2)                    # evita devolver fragmento minusculo
+    ap = _aparar_para_caber(texto, limite, faixa)
+    if ap is not None and piso <= contar(ap) <= limite:
+        return ap, False
+    melhor = ""                                   # maior prefixo terminando em frase
+    for m in re.finditer(r"[.!?…]+(?=\s|$)", texto):
+        if m.end() <= limite:
+            melhor = texto[:m.end()]
+        else:
+            break
+    if len(melhor) >= piso:
+        return melhor, False
+    return _cortar(texto, limite), True
+
+
 def _fidelidade_violacoes(original: str, saida: str) -> int:
     """Quantos nomes proprios + numeros do `original` SUMIRAM de `saida`. Defesa
     contra a reescrita gerativa perder/mutilar um nome (ex.: 'Monaco' ->
@@ -474,8 +505,10 @@ def resumir(
         elif cancelado_flag:
             final = ""  # cancelou antes de obter qualquer parcial valido
         else:
-            final = _cortar(atual or "", limite)
-            cortado = True
+            # nada coube: reduz da forma mais LIMPA possivel (apara clausulas ou
+            # termina numa frase); so usa corte com '...' em ultimo caso.
+            final, cortado = _encolher_limpo(
+                atual or "", limite, max(tolerancia_1, tolerancia_2))
         if contar(final) > limite:  # ultima garantia da invariante
             final = _cortar(final, limite)
             cortado = True
@@ -575,6 +608,13 @@ def resumir(
             n = contar(atual)
             historico.append(n)
             registra_melhor(atual)
+            # PARADA ANTECIPADA: se o modelo estacionou (3 tamanhos iguais
+            # seguidos) ainda ACIMA do limite, insistir nao adianta -- o limite
+            # esta abaixo do "piso" do modelo. Encerra e deixa o finalizar aparar
+            # de forma limpa, sem gastar as tentativas restantes.
+            if (n > limite and len(historico) >= 3
+                    and historico[-1] == historico[-2] == historico[-3]):
+                return finalizar(atual, False)
         if minimo <= n <= limite:
             break  # convergiu; nao precisa da proxima rodada
 
