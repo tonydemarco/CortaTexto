@@ -1,0 +1,8 @@
+# O CortaTexto roda 100% LOCAL via Ollama -- NAO ha dependencias Python de
+# runtime (a chamada ao Ollama usa a stdlib; o Tkinter ja vem no Python do macOS).
+#
+# Requisitos EXTERNOS (instale fora do pip):
+#   1. Ollama:  https://ollama.com   (ou:  brew install ollama)
+#   2. Um modelo, por exemplo:  ollama pull qwen3
+#
+# Para desenvolvimento/testes, veja requirements-dev.txt (pytest).
