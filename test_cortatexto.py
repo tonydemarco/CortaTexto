@@ -47,6 +47,28 @@ def test_ja_cabe_sem_chamar_llm():
 # --------------------------------------------------------------------------
 # Loop de encurtamento quando acima do limite
 # --------------------------------------------------------------------------
+def test_curvar_aspas_abre_e_fecha():
+    # U+0022 (copo na Garoa) -> curvas: “ na abertura, ” no fechamento
+    assert ct._curvar_aspas('ele disse "oi" e saiu') == 'ele disse “oi” e saiu'
+    assert ct._curvar_aspas('"inicio" e "fim"') == '“inicio” e “fim”'
+    assert ct._curvar_aspas("sem aspas") == "sem aspas"
+    assert '"' not in ct._curvar_aspas('um "teste" aqui')   # nunca sobra U+0022
+    # troca 1:1 em code points -> NAO altera a contagem de caracteres
+    s = 'a "b c" d'
+    assert len(ct._curvar_aspas(s)) == len(s)
+
+
+def test_relatar_reporta_cada_tentativa():
+    # o callback `relatar` recebe (numero_da_tentativa, caracteres) a cada passo
+    saidas = iter(["a" * 400, "a" * 350, "a" * 278])
+    reportes = []
+    r = ct.resumir("orig " * 300, 280,
+                   chamar_llm=lambda s, u: next(saidas),
+                   relatar=lambda t, c: reportes.append((t, c)))
+    assert reportes == [(1, 400), (2, 350), (3, 278)]
+    assert r.historico == [400, 350, 278]
+
+
 def test_encurtamento_converge():
     saidas = iter(["a" * 400, "a" * 350, "a" * 278])
 

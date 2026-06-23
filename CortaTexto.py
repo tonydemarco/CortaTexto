@@ -240,6 +240,28 @@ def _cortar(texto: str, limite: int) -> str:
     return resultado[:limite]
 
 
+# Aberturas: posicoes onde uma aspa dupla deve ser “ (U+201C) em vez de ” (U+201D).
+_ABRE_ASPA = set(" \t\n\r([{“‘—–«")
+
+
+def _curvar_aspas(s: str) -> str:
+    """Troca toda aspa dupla reta U+0022 (\") por aspa curva tipografica:
+    “ (U+201C) em posicao de ABERTURA e ” (U+201D) em posicao de FECHAMENTO.
+    Necessario porque a fonte Garoa Light desenha um COPO no glifo U+0022 -- ele
+    nunca deve aparecer na interface. A troca e 1:1 em code points, entao nao
+    altera a contagem de caracteres."""
+    if '"' not in s:
+        return s
+    res: List[str] = []
+    for ch in s:
+        if ch == '"':
+            ant = res[-1] if res else ""
+            res.append("“" if (ant == "" or ant in _ABRE_ASPA) else "”")
+        else:
+            res.append(ch)
+    return "".join(res)
+
+
 # ---------------------------------------------------------------------------
 # APARAR PARA CABER (corte pequeno): o LLM micro-edita o texto (sinonimos
 # curtos, tira artigos/palavras superfluas, sem apagar frases) e costuma ficar
@@ -451,6 +473,7 @@ def resumir(
     max_tentativas: int = MAX_TENTATIVAS_PADRAO,
     chamar_llm: Callable[[str, str], str],
     deve_cancelar: Optional[Callable[[], bool]] = None,
+    relatar: Optional[Callable[[int, int], None]] = None,
 ) -> Resultado:
     """Resume `texto` para caber em `limite` caracteres usando tolerancia
     progressiva (rodada 1 -> tolerancia_1; rodada 2 -> tolerancia_2).
@@ -458,6 +481,8 @@ def resumir(
     `chamar_llm(sistema, usuario)` e injetada para permitir mock em testes.
     `deve_cancelar()` (opcional) e consultada entre tentativas; quando True, o
     loop aborta cedo e devolve o melhor resumo parcial que ja cabe no limite.
+    `relatar(tentativa, caracteres)` (opcional) e chamada a cada tentativa, para
+    a interface mostrar o progresso ao vivo.
     """
     # --- Validacao do contrato publico (defesa em profundidade) ---
     if limite < 1:
@@ -479,6 +504,13 @@ def resumir(
 
     historico: List[int] = []
     melhor: Optional[str] = None  # melhor candidato que cabe no limite
+
+    def anota(caracteres: int) -> None:
+        """Registra uma tentativa no historico e a reporta ao vivo (se houver
+        callback `relatar`), para a interface mostrar o progresso."""
+        historico.append(caracteres)
+        if relatar is not None:
+            relatar(len(historico), caracteres)
 
     def registra_melhor(cand: str) -> None:
         nonlocal melhor
@@ -551,11 +583,11 @@ def resumir(
                 break
             cand = validar(chamar_llm(_SISTEMA_MICRO,
                                       _prompt_micro_edicao(texto, limite, minimo)))
-            historico.append(contar(cand))
             if contar(cand) > limite:          # passou: apara o excesso (Python)
                 aparado = _aparar_para_caber(cand, limite, faixa)
                 if aparado is not None:
                     cand = aparado
+            anota(contar(cand))                # reporta o tamanho efetivo da tentativa
             viol = _fidelidade_violacoes(texto, cand) if contar(cand) <= limite \
                 else 1 + len(texto)            # nao coube: pior que qualquer fiel
             if melhor_viol is None or viol < melhor_viol:
@@ -576,7 +608,7 @@ def resumir(
             return finalizar(texto, False)       # corte de seguranca do original
         atual = validar(chamar_llm(
             _SISTEMA, _prompt_inicial(texto, limite, max(0, limite - tolerancia_1))))
-        historico.append(contar(atual))
+        anota(contar(atual))
         registra_melhor(atual)
     n = contar(atual)
 
@@ -606,7 +638,7 @@ def resumir(
                                _prompt_expandir(texto, atual, n, limite, minimo))
                 )
             n = contar(atual)
-            historico.append(n)
+            anota(n)
             registra_melhor(atual)
             # PARADA ANTECIPADA: se o modelo estacionou (3 tamanhos iguais
             # seguidos) ainda ACIMA do limite, insistir nao adianta -- o limite
@@ -1776,6 +1808,11 @@ class App(tk.Tk):
         self._ajustar_janela()
 
         self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
+        # Enter aciona Resumir -- EXCETO quando o foco esta numa caixa de texto
+        # multilinha (entrada/saida editavel), onde Enter insere quebra de linha.
+        # Ctrl/Command+Enter aciona Resumir sempre (inclusive dentro das caixas).
+        self.bind("<Return>", self._on_return)
+        self.bind("<KP_Enter>", self._on_return)
         self.bind("<Control-Return>", lambda e: self._on_resumir())
         self.bind("<Command-Return>", lambda e: self._on_resumir())
         self.bind("<Escape>", lambda e: self._cancelar())
@@ -1916,7 +1953,10 @@ class App(tk.Tk):
         Canvas que desenha a pilula branca de borda cinza. Retorna (card, entry)."""
         f = tkfont.Font(font=self._f_base)
         h = f.metrics("linespace") + 14                  # altura ~ 1 linha + folga
-        w = f.measure("0") * chars + h + 8               # largura do texto + curvas
+        # Largura = texto + folga das pontas arredondadas. Folga enxuta (h//2,
+        # ~1 raio) para o campo ficar estreito; nunca menor que a altura, senao a
+        # pilula vira circulo.
+        w = max(h, f.measure("0") * chars + h // 2)
         card = tk.Frame(parent, bg=COR_FUNDO, width=w, height=h,
                         highlightthickness=0, bd=0)
         card.grid_propagate(False)                       # mantem o tamanho fixo
@@ -2001,7 +2041,6 @@ class App(tk.Tk):
 
     # ---- construcao da UI -------------------------------------------------
     def _construir(self) -> None:
-        pad = {"padx": 8, "pady": 5}
         # Estilos reutilizaveis (tema claro: texto PRETO, cinza so em bordas/campos).
         est_lbl = {"bg": COR_FUNDO, "fg": COR_TEXTO}
         est_dim = {"bg": COR_FUNDO, "fg": COR_TEXTO, "font": self._f_pequena}
@@ -2036,35 +2075,46 @@ class App(tk.Tk):
         card_ent.grid(row=2, column=0, columnspan=4, sticky="nsew",
                       padx=14, pady=4)
         self.txt_entrada.bind("<KeyRelease>", self._atualizar_contagem_entrada)
+        # Aspas curvas: nunca deixar entrar/exibir U+0022 (copo na Garoa Light).
+        self.txt_entrada.bind("<Key>", self._aspa_curva)
         self.txt_entrada.bind(
-            "<<Paste>>", lambda e: self.after(10, self._atualizar_contagem_entrada))
+            "<<Paste>>",
+            lambda e: self._colar_curvo(e, self._atualizar_contagem_entrada))
 
         # ---- parametros ----
         params = tk.Frame(self, bg=COR_FUNDO)
         params.grid(row=3, column=0, columnspan=4, sticky="ew", padx=12, pady=2)
+        # Quatro grupos (rotulo + campo) distribuidos pela largura toda:
+        # grupos nas pontas e gaps iguais no meio ("space-between"). As colunas
+        # IMPARES (3, 6, 9) sao espacadoras com peso -- elas absorvem a sobra de
+        # largura e empurram os grupos para se distribuirem por igual. Dentro de
+        # cada grupo o rotulo fica colado no seu campo (padx pequeno).
+        celp = {"pady": 5}
         tk.Label(params, text="Reduza para:", **est_lbl).grid(
-            row=0, column=0, **pad)
+            row=0, column=0, padx=(0, 6), **celp)
         self.var_limite = tk.StringVar(value="280")
-        self._campo_pilula(params, self.var_limite, 7)[0].grid(
-            row=0, column=1, **pad)
+        self._campo_pilula(params, self.var_limite, 4)[0].grid(
+            row=0, column=1, **celp)
         tk.Label(params, text="caracteres", **est_lbl).grid(
-            row=0, column=2, **pad)
+            row=0, column=2, padx=(6, 0), **celp)
         self.var_limite.trace_add("write", lambda *a: self._recontar_saida())
-        tk.Label(params, text="Tolerancia 1:", **est_lbl).grid(
-            row=0, column=3, **pad)
+        tk.Label(params, text="Tolerância 1:", **est_lbl).grid(
+            row=0, column=4, padx=(0, 6), **celp)
         self.var_tol1 = tk.StringVar(value=str(TOLERANCIA_RODADA_1))
-        self._campo_pilula(params, self.var_tol1, 5)[0].grid(
-            row=0, column=4, **pad)
-        tk.Label(params, text="Tolerancia 2:", **est_lbl).grid(
-            row=0, column=5, **pad)
+        self._campo_pilula(params, self.var_tol1, 3)[0].grid(
+            row=0, column=5, **celp)
+        tk.Label(params, text="Tolerância 2:", **est_lbl).grid(
+            row=0, column=7, padx=(0, 6), **celp)
         self.var_tol2 = tk.StringVar(value=str(TOLERANCIA_RODADA_2))
-        self._campo_pilula(params, self.var_tol2, 5)[0].grid(
-            row=0, column=6, **pad)
+        self._campo_pilula(params, self.var_tol2, 3)[0].grid(
+            row=0, column=8, **celp)
         tk.Label(params, text="Max. tentativas:", **est_lbl).grid(
-            row=0, column=7, **pad)
+            row=0, column=10, padx=(0, 6), **celp)
         self.var_tentativas = tk.StringVar(value=str(MAX_TENTATIVAS_PADRAO))
-        self._campo_pilula(params, self.var_tentativas, 5)[0].grid(
-            row=0, column=8, **pad)
+        self._campo_pilula(params, self.var_tentativas, 3)[0].grid(
+            row=0, column=11, **celp)
+        for _c in (3, 6, 9):                     # espacadores entre os grupos
+            params.grid_columnconfigure(_c, weight=1, minsize=24)
 
         # (Sem campo de modelo na UI -- usa o MODELO_OLLAMA fixo, local via Ollama.)
 
@@ -2096,6 +2146,9 @@ class App(tk.Tk):
         card_sai.grid(row=8, column=0, columnspan=4, sticky="nsew",
                       padx=14, pady=4)
         self.txt_saida.bind("<KeyRelease>", self._recontar_saida)
+        self.txt_saida.bind("<Key>", self._aspa_curva)
+        self.txt_saida.bind(
+            "<<Paste>>", lambda e: self._colar_curvo(e, self._recontar_saida))
         self.lbl_contagem = tk.Label(self, text="", bg=COR_FUNDO,
                                      fg=COR_NORMAL, font=self._f_pequena)
         self.lbl_contagem.grid(row=9, column=0, columnspan=4, sticky="w",
@@ -2125,6 +2178,8 @@ class App(tk.Tk):
     def _recontar_saida(self, evento=None) -> None:
         if not hasattr(self, "txt_saida"):
             return
+        if self._processando:
+            return  # durante o processamento o rotulo mostra o progresso ao vivo
         n = contar(self.txt_saida.get("1.0", "end-1c"))
         lim = self._limite_atual()
         if lim is None:
@@ -2139,6 +2194,16 @@ class App(tk.Tk):
                                      foreground=COR_NORMAL)
 
     # ---- acao do botao ----------------------------------------------------
+    def _on_return(self, event=None):
+        """Enter aciona Resumir, MENOS quando o foco esta numa caixa de texto
+        multilinha (entrada ou saida editavel) -- ali Enter insere quebra de
+        linha normalmente. Use Ctrl/Command+Enter para acionar de dentro delas."""
+        if self.focus_get() in (getattr(self, "txt_entrada", None),
+                                 getattr(self, "txt_saida", None)):
+            return  # deixa o widget inserir a quebra de linha
+        self._on_resumir()
+        return "break"
+
     def _on_resumir(self) -> None:
         if self._processando:
             return  # ja ha um job em andamento (barra reentrancia)
@@ -2219,12 +2284,18 @@ class App(tk.Tk):
             def chamar(sistema: str, usuario: str) -> str:
                 return _chamar_ollama(modelo, sistema, usuario, max_toks)
 
+            def relatar(tentativa: int, caracteres: int) -> None:
+                # Roda na thread de trabalho: so enfileira (thread-safe); quem
+                # toca a UI e o _checar_fila, na thread principal.
+                self._fila.put((job_id, "progresso", (tentativa, caracteres)))
+
             res = resumir(
                 texto, limite,
                 tolerancia_1=tol1, tolerancia_2=tol2,
                 max_tentativas=tentativas,
                 chamar_llm=chamar,
                 deve_cancelar=self._cancelar_evt.is_set,
+                relatar=relatar,
             )
             self._fila.put((job_id, "ok", res))
         except Exception as e:  # erros de rede/API/logica
@@ -2233,44 +2304,55 @@ class App(tk.Tk):
     def _checar_fila(self) -> None:
         if not self.winfo_exists():  # janela ja foi fechada
             return
-        try:
-            jid, tipo, payload = self._fila.get_nowait()
-        except queue.Empty:
-            if self._processando:
-                self._after_id = self.after(100, self._checar_fila)
+        # Drena tudo o que chegou: mensagens de PROGRESSO atualizam o rotulo ao
+        # vivo (e seguem drenando); a final ('ok'/'erro') encerra.
+        while True:
+            try:
+                jid, tipo, payload = self._fila.get_nowait()
+            except queue.Empty:
+                if self._processando:
+                    self._after_id = self.after(80, self._checar_fila)
+                return
+
+            if jid != self._job_id:
+                continue  # job cancelado/obsoleto -> descarta e segue drenando
+
+            if tipo == "progresso":
+                tent, chars = payload
+                self.lbl_contagem.config(
+                    text=f"Tentativa {tent} — {chars} caracteres",
+                    foreground=COR_NORMAL)
+                continue  # ao vivo: nao encerra ainda
+
+            # tipo == 'ok' ou 'erro': encerra o processamento
+            self._finalizar_processamento()
+            if tipo == "erro":
+                # after_idle evita abrir o dialogo modal de dentro do callback de
+                # polling (no aqua do macOS isso pode prender o foco).
+                self.after_idle(lambda p=payload: messagebox.showerror(
+                    "Erro ao resumir", p))
+                return
+
+            res: Resultado = payload
+            self._set_saida(res.texto)
+            if res.texto.strip():
+                self._set_botao(self.btn_copiar, True)
+
+            if res.cancelado:
+                sufixo = "  -  Cancelado"
+            elif res.cortado:
+                sufixo = "  -  (corte automatico aplicado)"
+            else:
+                sufixo = ""
+            cor = COR_ALERTA if res.caracteres > res.limite else COR_NORMAL
+            if res.tentativas == 0:                    # original ja cabia
+                texto_lbl = f"{res.caracteres} caracteres (ja cabia no limite)"
+            else:
+                plural = "tentativa" if res.tentativas == 1 else "tentativas"
+                texto_lbl = (f"{res.caracteres} caracteres em "
+                             f"{res.tentativas} {plural}{sufixo}")
+            self.lbl_contagem.config(text=texto_lbl, foreground=cor)
             return
-
-        if jid != self._job_id:
-            # resultado de um job cancelado/obsoleto -> descarta sem exibir
-            if self._processando:
-                self._after_id = self.after(100, self._checar_fila)
-            return
-
-        self._finalizar_processamento()
-
-        if tipo == "erro":
-            # after_idle evita abrir o dialogo modal de dentro do callback de
-            # polling (no aqua do macOS isso pode prender o foco).
-            self.after_idle(lambda: messagebox.showerror("Erro ao resumir",
-                                                          payload))
-            return
-
-        res: Resultado = payload
-        self._set_saida(res.texto)
-        if res.texto.strip():
-            self._set_botao(self.btn_copiar, True)
-
-        if res.cancelado:
-            sufixo = "  -  Cancelado"
-        elif res.cortado:
-            sufixo = "  -  (corte automatico aplicado)"
-        else:
-            sufixo = ""
-        cor = COR_ALERTA if res.caracteres > res.limite else COR_NORMAL
-        self.lbl_contagem.config(
-            text=(f"{res.caracteres} / {res.limite} caracteres"
-                  f"  -  {res.tentativas} tentativas{sufixo}"),
-            foreground=cor)
 
     def _finalizar_processamento(self) -> None:
         self._processando = False
@@ -2282,9 +2364,38 @@ class App(tk.Tk):
             pass
 
     # ---- utilitarios UI ---------------------------------------------------
+    def _aspa_curva(self, event):
+        """Ao digitar a aspa reta (U+0022), insere a aspa curva apropriada
+        (“ na abertura, ” no fechamento) -- o glifo reto vira um copo na Garoa
+        Light, entao nunca deve ser inserido."""
+        if event.char != '"':
+            return None  # qualquer outra tecla segue normalmente
+        w = event.widget
+        try:
+            ant = w.get("insert -1c", "insert")
+        except tk.TclError:
+            ant = ""
+        w.insert("insert", "“" if (ant == "" or ant in _ABRE_ASPA) else "”")
+        return "break"  # impede a insercao do U+0022
+
+    def _colar_curvo(self, event, recontar):
+        """Cola convertendo aspas retas em curvas (nunca exibir U+0022)."""
+        w = event.widget
+        try:
+            conteudo = self.clipboard_get()
+        except tk.TclError:
+            return "break"
+        try:
+            w.delete("sel.first", "sel.last")   # substitui a selecao, se houver
+        except tk.TclError:
+            pass
+        w.insert("insert", _curvar_aspas(conteudo))
+        self.after(10, recontar)
+        return "break"  # substitui o colar padrao (que traria U+0022)
+
     def _set_saida(self, texto: str) -> None:
         self.txt_saida.delete("1.0", "end")
-        self.txt_saida.insert("1.0", texto)
+        self.txt_saida.insert("1.0", _curvar_aspas(texto))  # nunca exibir U+0022
         self._recontar_saida()
 
     def _copiar(self) -> None:
