@@ -61,7 +61,6 @@ import socket
 import sys
 import threading
 import tkinter as tk
-import unicodedata
 import urllib.error
 import urllib.request
 import zlib
@@ -81,8 +80,6 @@ MAX_TOKENS_MIN = 2048            # piso de tokens de saida
 MAX_TOKENS_TETO = 16384          # teto de tokens de saida (evita custo absurdo)
 TEMPERATURA = 0.3                # baixa = mais fiel e estavel
 TIMEOUT_API = 60.0               # segundos por requisicao (falha rapido na rede)
-TIMEOUT_DELECAO = 40.0           # timeout menor na listagem (cai no fallback rapido)
-NUM_PREDICT_DELECAO = 400        # saida curta na listagem de trechos (rapida ~8s)
 TOLERANCIA_RODADA_1 = 10         # caracteres a menos aceitos na 1a rodada
 TOLERANCIA_RODADA_2 = 20         # caracteres a menos aceitos na 2a rodada
 MAX_TENTATIVAS_PADRAO = 10       # total de tentativas (dividido entre as rodadas)
@@ -142,34 +139,39 @@ _SISTEMA = (
 )
 
 
-_SISTEMA_DELECAO = (
-    "Voce e um editor que aponta trechos DESCARTAVEIS de um texto para encurta-lo "
-    "por DELECAO (sem reescrever). Voce NUNCA parafraseia, traduz nem inventa: "
-    "apenas COPIA ao pe da letra os trechos menos essenciais que podem sair "
-    "preservando o sentido e a gramatica do restante. Responda apenas com a lista "
-    "pedida, sem comentarios."
+_SISTEMA_MICRO = (
+    "Voce e um editor de copy desk que ENXUGA textos com edicoes MINIMAS, mantendo "
+    "TODAS as frases, fatos e a ordem. Voce NAO resume nem remove frases inteiras: "
+    "aperta a redacao tirando palavras superfluas (artigos, pronomes e adverbios "
+    "dispensaveis, repeticoes) e trocando expressoes longas por sinonimos mais "
+    "curtos. REGRAS ABSOLUTAS DE FIDELIDADE: (1) use somente palavras INTEIRAS e "
+    "reais do portugues; NUNCA abrevie nem corte palavras pela metade. (2) Preserve "
+    "EXATAMENTE a grafia de todo nome proprio -- copie cada nome letra por letra "
+    "(ex.: 'Monaco' continua 'Monaco', JAMAIS 'Monaca' ou 'Mon'). (3) NAO altere "
+    "numeros nem datas. (4) Mantenha TODOS os itens de listas e enumeracoes -- nao "
+    "remova nenhum (ex.: 'China, Japao, Miami, Canada e Monaco' deve continuar com "
+    "os cinco). Mantenha idioma, tom e sentido. Responda apenas com o texto, sem "
+    "comentarios nem rotulos."
 )
 
 
-def _prompt_delecao(texto: str, remover: int) -> str:
-    """Pede ao modelo UMA lista de trechos a deletar (copiados literalmente do
-    original). Quem mede e remove e o Python -- o modelo so opina sobre O QUE
-    sai, nao sobre o tamanho final."""
+def _prompt_micro_edicao(texto: str, limite: int, minimo: int) -> str:
+    """Pede uma versao MICRO-EDITADA: mais enxuta com edicoes minimas e
+    distribuidas, mantendo todas as frases. O modelo costuma ficar um pouco
+    acima de `limite`; o Python apara o excesso depois (ver _aparar_para_caber).
+    Por isso miramos um pouco abaixo do limite no pedido, para reduzir o aparo."""
     orig = len(texto)
-    alvo = max(remover * 2, remover + 80)
+    alvo = max(minimo, limite - 15)
     return (
-        f"O texto abaixo tem {orig} caracteres e preciso encurta-lo: removendo "
-        f"cerca de {remover} caracteres ele cabe no limite. Sua tarefa NAO e "
-        f"resumir nem reescrever, e apenas APONTAR trechos que podem ser DELETADOS "
-        f"sem prejudicar o sentido: oracoes acessorias, exemplos, repeticoes, "
-        f"apostos, adjetivos/adverbios dispensaveis, detalhes secundarios.\n\n"
-        f"Liste esses trechos UM POR LINHA, do MENOS essencial (em cima) ao MAIS "
-        f"essencial (embaixo). Prefira MUITOS trechos PEQUENOS a poucos grandes "
-        f"(assim sobra margem para encaixar a contagem). Inclua trechos suficientes "
-        f"para somar BEM MAIS que {remover} caracteres (uns {alvo}). COPIE cada "
-        f"trecho EXATAMENTE como aparece no texto -- mesmas palavras, acentos, "
-        f"espacos e pontuacao. NAO reescreva, NAO traduza, NAO invente, NAO "
-        f"numere. Responda SOMENTE com a lista.\n\nTEXTO:\n{texto}"
+        f"O texto abaixo tem {orig} caracteres. Reduza para perto de {alvo} "
+        f"caracteres (no maximo {limite}) removendo cerca de {orig - alvo}, com "
+        f"edicoes MINIMAS e distribuidas ao longo de TODO o texto: corte artigos e "
+        f"palavras superfluas, troque palavras longas por sinonimos curtos, enxugue "
+        f"as frases. NAO apague frases inteiras nem fatos: o resultado deve conter "
+        f"TODAS as frases e informacoes do original, apenas mais enxutas. Preserve "
+        f"EXATAMENTE nomes proprios (letra por letra), numeros e TODOS os itens de "
+        f"listas. Fique o mais PROXIMO possivel de {limite} sem ultrapassar.\n\n"
+        f"TEXTO:\n{texto}"
     )
 
 
@@ -231,82 +233,15 @@ def _cortar(texto: str, limite: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CAMINHO DE DELECAO (corte pequeno): o Python e o dono da contagem.
-# O LLM so sugere QUAIS trechos remover (copiados do original); o Python casa
-# esses trechos, escolhe um subconjunto que faca o resultado caber o mais perto
-# possivel do topo e remove -- resultado fiel (so apaga material do autor) e
-# estavel entre execucoes (a contagem nao depende do modelo).
+# APARAR PARA CABER (corte pequeno): o LLM micro-edita o texto (sinonimos
+# curtos, tira artigos/palavras superfluas, sem apagar frases) e costuma ficar
+# um pouco ACIMA do limite; o PYTHON entao apara o excesso removendo o minimo de
+# trechos acessorios (heuristica pura), sem decapitar a 1a frase nem o fecho.
+# Assim a qualidade vem do LLM e a contagem fica garantida pelo Python.
 # ---------------------------------------------------------------------------
 def _ocupa(i: int, j: int, usados: List[tuple]) -> bool:
     """True se o intervalo [i, j) se sobrepoe a algum ja aceito."""
     return any(i < y and x < j for (x, y) in usados)
-
-
-def _achar_trecho(texto: str, t: str, usados: List[tuple]) -> Optional[tuple]:
-    """Localiza `t` no original e devolve (inicio, fim) da fatia ORIGINAL exata,
-    sem sobrepor trechos ja aceitos. Tenta casamento exato e, se falhar, casa
-    ignorando diferencas de espaco em branco (o modelo costuma recopiar com
-    espacos trocados). Tenta tambem as formas NFC/NFD do trecho: o original
-    (NFC no macOS) e a copia do modelo podem diferir so na composicao de
-    acentos; casamos mapeando para a fatia ORIGINAL (offsets do texto cru), o
-    que preserva contagem e fidelidade."""
-    formas: List[str] = []
-    for f in (t, unicodedata.normalize("NFC", t), unicodedata.normalize("NFD", t)):
-        if f not in formas:
-            formas.append(f)
-    for tt in formas:                         # 1) casamento exato
-        inicio = 0
-        while True:
-            i = texto.find(tt, inicio)
-            if i < 0:
-                break
-            if not _ocupa(i, i + len(tt), usados):
-                return (i, i + len(tt))
-            inicio = i + 1
-    for tt in formas:                         # 2) flexivel em espacos em branco
-        toks = tt.split()
-        if not toks:
-            continue
-        padrao = r"\s+".join(re.escape(tok) for tok in toks)
-        for m in re.finditer(padrao, texto):
-            i, j = m.span()
-            if not _ocupa(i, j, usados):
-                return (i, j)
-    return None
-
-
-_ASPAS = "\"'“”‘’"
-
-
-def _parse_e_casar_spans(resp: str, texto: str) -> List[tuple]:
-    """Le a resposta do modelo (um trecho por linha) e casa cada trecho com o
-    ORIGINAL. Devolve a lista de (inicio, fim) na ordem dada (menos -> mais
-    essencial), sem sobreposicoes. Trechos que nao casam sao ignorados
-    (seguranca: nunca remover o que nao existe no original).
-
-    Para cada linha tenta casar a forma MENOS limpa que existir no texto, antes
-    de tirar marcadores: assim um trecho que comeca legitimamente com numero +
-    pontuacao (ex.: 'O artigo 5. trata de...') nao tem o '5.' removido por
-    engano (o que deixaria um numero orfao no resultado)."""
-    usados: List[tuple] = []
-    spans: List[tuple] = []
-    for linha in (resp or "").splitlines():
-        base = linha.strip().strip(_ASPAS).strip()
-        if not base:
-            continue
-        sem_bullet = re.sub(r"^[\s\-\*•–—>#]+", "", base).strip(_ASPAS).strip()
-        sem_num = re.sub(r"^\d+[\.\)\-:]\s*", "", sem_bullet).strip(_ASPAS).strip()
-        rng = None
-        for t in (base, sem_bullet, sem_num):   # do menos ao mais "limpo"
-            if len(t) < 2:
-                continue
-            rng = _achar_trecho(texto, t, usados)
-            if rng:
-                break
-        if rng:
-            usados.append(rng)
-            spans.append(rng)
-    return spans
 
 
 def _spans_heuristicos(texto: str) -> List[tuple]:
@@ -340,16 +275,6 @@ def _spans_heuristicos(texto: str) -> List[tuple]:
     return spans
 
 
-def _mesclar_spans(a: List[tuple], b: List[tuple]) -> List[tuple]:
-    """Junta dois conjuntos de trechos descartando sobreposicoes (mantem os de
-    `a`, acrescenta de `b` os que nao colidem)."""
-    resultado = list(a)
-    for rng in b:
-        if not _ocupa(rng[0], rng[1], resultado):
-            resultado.append(rng)
-    return resultado
-
-
 def _mapa_subconjuntos(comprimentos: List[int]) -> dict:
     """Subset-sum 0/1: mapeia cada SOMA alcancavel -> um conjunto de indices que
     a produz. Usado para escolher quais trechos remover de modo que o resultado
@@ -365,12 +290,24 @@ def _mapa_subconjuntos(comprimentos: List[int]) -> dict:
     return alcancavel
 
 
+def _corrigir_maiusculas(s: str) -> str:
+    """Garante inicial maiuscula no comeco do texto e apos fim de frase. Util
+    quando uma remocao expoe um novo inicio de frase que estava em minuscula no
+    meio do periodo original (ex.: cair de '..., as series' para 'As series')."""
+    def subir(m: "re.Match") -> str:
+        return m.group(1) + m.group(2).upper()
+    s = re.sub(r"(^\s*)([^\W\d_])", subir, s)                 # inicio do texto
+    s = re.sub(r"([.!?][\"'»”’)\]]?\s+)([^\W\d_])", subir, s)  # apos fim de frase
+    return s
+
+
 def _remover_e_costurar(texto: str, ranges: List[tuple]) -> str:
     """Remove os intervalos dados e costura as juncoes para o texto seguir
-    natural: colapsa espacos, tira espaco antes de pontuacao e conserta os
+    natural: colapsa espacos, tira espaco antes de pontuacao, conserta os
     artefatos tipicos de remover uma oracao do meio de um periodo -- pontuacao
     de pausa duplicada (', ,' -> ','), virgula encostada no fim de frase
-    (', .' -> '.') e pontuacao orfa no inicio."""
+    (', .' -> '.') e pontuacao orfa no inicio -- e corrige a capitalizacao
+    de inicio de frase exposta pela remocao."""
     if not ranges:
         return texto
     partes: List[str] = []
@@ -393,49 +330,48 @@ def _remover_e_costurar(texto: str, ranges: List[tuple]) -> str:
     s = re.sub(r"(^|[\n.!?]\s*)[,;:]+\s*", r"\1", s)  # pontuacao orfa no inicio/apos frase
     s = re.sub(r" +\n", "\n", s)
     s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
+    return _corrigir_maiusculas(s.strip())
 
 
-def _tentar_delecao(texto: str, limite: int, faixa: int,
-                    chamar_llm: Callable[[str, str], str]) -> Optional[str]:
-    """Caminho de deleção (corte pequeno). UMA chamada ao LLM pede a lista de
-    trechos a remover; o Python casa, escolhe o subconjunto que aproxima o
-    resultado do topo da faixa e remove. Devolve o candidato (sempre <= limite)
-    ou None se nem removendo todos os trechos sugeridos da para caber -- caso em
-    que o fluxo gerativo assume."""
-    orig = len(texto)
-    remover = orig - limite
-    if remover <= 0:
-        return None
-    # Pede a lista de trechos a remover. Erros TRANSITORIOS (timeout, truncamento,
-    # resposta vazia) caem no segmentador heuristico (puro Python) -- a deleção
-    # nunca depende do LLM. Erros de CONFIGURACAO (Ollama fora do ar, modelo
-    # ausente) propagam: o usuario precisa resolver, nao mascarar.
-    try:
-        resp = chamar_llm(_SISTEMA_DELECAO, _prompt_delecao(texto, remover))
-    except ErroOllamaIndisponivel:
-        raise
-    except ErroResumo:
-        resp = ""
-    # Spans do LLM (ordenados do menos ao mais essencial) PRIMEIRO; sempre
-    # enriquecidos com os heuristicos (puro Python), que adicionam opcoes finas
-    # de clausula nao cobertas pelo LLM. Mais opcoes = subset-sum cai mais perto
-    # do topo, mesmo quando o LLM devolve poucos trechos ou nenhum.
-    spans = _mesclar_spans(_parse_e_casar_spans(resp, texto),
-                           _spans_heuristicos(texto))
+def _limites_abertura_fecho(texto: str) -> tuple:
+    """Devolve (fim_da_1a_frase, inicio_da_ultima_frase) para proteger o lead e
+    o desfecho na deleção. Se houver 0-1 frases, nao protege nada (0, len)."""
+    sent = list(re.finditer(r"[^.!?\n]*[.!?]+(?:\s|$)", texto))
+    if len(sent) < 3:
+        return (0, len(texto))
+    return (sent[0].end(), sent[-1].start())
+
+
+def _aparar_para_caber(texto: str, limite: int, faixa: int) -> Optional[str]:
+    """Apara `texto` para caber em `limite` removendo o MINIMO de trechos
+    acessorios (heuristica pura, SEM LLM), o mais perto possivel do topo, sem
+    decapitar a 1a frase nem cortar o fecho. Usado para aparar o excesso da
+    micro-edição do LLM (que costuma ficar um pouco acima do limite). Devolve o
+    texto aparado (sempre <= limite) ou None se nao der para caber so removendo
+    acessorios (ai o corte de seguranca de `finalizar` assume)."""
+    excesso = len(texto) - limite
+    if excesso <= 0:
+        return texto                                # ja cabe
+    spans = _spans_heuristicos(texto)
+    # QUALIDADE: nao decapitar a abertura nem cortar o fecho. Apara do corpo; so
+    # mexe na 1a/ultima frase se nao houver material suficiente no meio.
+    fim_1a, ini_ult = _limites_abertura_fecho(texto)
+    corpo = [(a, b) for (a, b) in spans if a >= fim_1a and b <= ini_ult]
+    if sum(b - a for a, b in corpo) >= excesso:
+        spans = corpo
     spans = spans[:80]                              # limita o custo do subset-sum
     comprimentos = [b - a for a, b in spans]
-    if sum(comprimentos) < remover:
-        return None                                 # impossivel caber so deletando
+    if sum(comprimentos) < excesso:
+        return None                                 # nao da para aparar so com acessorios
     alcancavel = _mapa_subconjuntos(comprimentos)
-    # Janela de somas plausiveis: queremos remover ~`remover` (resultado no topo).
-    # As costuras encurtam o texto em ~1 char por junta, entao admitimos somas um
-    # pouco abaixo de `remover` tambem; a medicao real por len() decide.
+    # Janela de somas plausiveis: remover ~`excesso` (ficar no topo). As costuras
+    # encurtam ~1 char por junta, entao admitimos somas um pouco abaixo tambem; a
+    # medicao real por len() decide (so aceita candidato <= limite).
     margem = len(spans) + 2
     somas = sorted(s for s in alcancavel
-                   if remover - margem <= s <= remover + faixa + margem)
+                   if excesso - margem <= s <= excesso + faixa + margem)
     if not somas:
-        somas = sorted(s for s in alcancavel if s >= remover)[:1]
+        somas = sorted(s for s in alcancavel if s >= excesso)[:1]
     melhor_cand: Optional[str] = None
     for s in somas:
         ranges = [spans[i] for i in alcancavel[s]]
@@ -444,6 +380,35 @@ def _tentar_delecao(texto: str, limite: int, faixa: int,
         if 0 < L <= limite and (melhor_cand is None or L > len(melhor_cand)):
             melhor_cand = cand                      # o maior que CABE (mais no topo)
     return melhor_cand
+
+
+def _nomes_proprios(texto: str) -> set:
+    """Nomes proprios candidatos: tokens iniciados por MAIUSCULA que NAO abrem
+    frase (estes seriam maiusculos so por posicao). Heuristica simples usada
+    para verificar que a micro-edição nao perdeu nem mutilou um nome."""
+    nomes = set()
+    inicio = True                               # proxima palavra abre frase?
+    for tok in re.finditer(r"\S+", texto):
+        bruto = tok.group(0)
+        palavra = bruto.strip(".,;:!?()[]{}\"'«»“”‘’…-—/")
+        if not inicio and len(palavra) >= 2 and palavra[:1].isupper():
+            nomes.add(palavra)
+        inicio = bool(re.search(r"[.!?…][\"'»”’)\]]?$", bruto))
+    return nomes
+
+
+def _fidelidade_violacoes(original: str, saida: str) -> int:
+    """Quantos nomes proprios + numeros do `original` SUMIRAM de `saida`. Defesa
+    contra a reescrita gerativa perder/mutilar um nome (ex.: 'Monaco' ->
+    'Monaca', sumir 'Japao') ou um numero. 0 = totalmente fiel nesses tokens."""
+    nums = set(re.findall(r"\d+", original)) - set(re.findall(r"\d+", saida))
+    nomes = sum(1 for nome in _nomes_proprios(original) if nome not in saida)
+    return len(nums) + nomes
+
+
+def _fidelidade_ok(original: str, saida: str) -> bool:
+    """True se `saida` preserva TODOS os nomes proprios e numeros do original."""
+    return _fidelidade_violacoes(original, saida) == 0
 
 
 def resumir(
@@ -529,29 +494,48 @@ def resumir(
 
     # ===== ROTEAMENTO POR REGIME ===========================================
     # Corte PEQUENO (limite perto do tamanho original): pedir um RESUMO faz o
-    # modelo "desabar" para seu tamanho natural -- bem abaixo do limite e
-    # instavel entre execucoes. Em vez disso, pedimos UMA lista de trechos a
-    # DELETAR e o PROPRIO PYTHON remove ate caber, o mais perto possivel do
-    # topo. Deterministico (a contagem nao depende do modelo) e fiel (so apaga
-    # material do autor). Corte GRANDE segue pelo fluxo gerativo abaixo.
+    # modelo "desabar" para seu tamanho natural -- bem abaixo do limite. Em vez
+    # disso pedimos uma MICRO-EDIÇÃO: o LLM enxuga o texto (tira artigos/palavras
+    # superfluas, troca por sinonimos curtos) MANTENDO todas as frases. Ele
+    # costuma ficar um pouco ACIMA do limite; o PYTHON entao apara o excesso
+    # removendo o minimo de trechos acessorios (perto do topo, sem decapitar a 1a
+    # frase nem o fecho). Qualidade do LLM + contagem garantida pelo Python.
+    # Corte GRANDE segue pelo fluxo gerativo (resumo) abaixo.
     atual: Optional[str] = None
     remover = contar(texto) - limite          # > 0 aqui (ja passou o atalho)
     if remover > 0 and remover / contar(texto) <= LIMIAR_CORTE_PEQUENO:
         faixa = max(tolerancia_1, tolerancia_2)
-        cand = _tentar_delecao(texto, limite, faixa, chamar_llm)
-        # A tentativa de deleção SEMPRE gastou 1 chamada (ou a tentou): conta no
-        # historico mesmo quando falha (cand None), para nao estourar o orcamento
-        # de max_tentativas com a chamada gerativa que vem depois.
-        historico.append(contar(cand) if cand is not None else 0)
-        if cand is not None:
-            registra_melhor(cand)
-            if contar(cand) >= limite - faixa:
-                return finalizar(cand, False)  # caiu na faixa: pronto (1 chamada)
-            atual = cand                       # nao bastou: refina no gerativo
+        minimo = max(0, limite - tolerancia_1)
+        # SALVAGUARDA DE FIDELIDADE: a reescrita gerativa as vezes perde/mutila um
+        # nome proprio ou numero. Geramos ate 3 micro-edições e ficamos com a
+        # PRIMEIRA que (apos o aparo) cabe E preserva todos os nomes/numeros. Se
+        # nenhuma for perfeita, adotamos a MENOS infiel (menor numero de nomes/
+        # numeros perdidos) -- e o resultado e editavel.
+        editado: Optional[str] = None
+        melhor_viol = None
+        for _ in range(min(max_tentativas, 3)):
+            if cancelado():
+                break
+            cand = validar(chamar_llm(_SISTEMA_MICRO,
+                                      _prompt_micro_edicao(texto, limite, minimo)))
+            historico.append(contar(cand))
+            if contar(cand) > limite:          # passou: apara o excesso (Python)
+                aparado = _aparar_para_caber(cand, limite, faixa)
+                if aparado is not None:
+                    cand = aparado
+            viol = _fidelidade_violacoes(texto, cand) if contar(cand) <= limite \
+                else 1 + len(texto)            # nao coube: pior que qualquer fiel
+            if melhor_viol is None or viol < melhor_viol:
+                editado, melhor_viol = cand, viol   # guarda a melhor ate agora
+            if contar(cand) <= limite and viol == 0:
+                break                          # cabe E fiel: pronto
+        if editado is None:                    # cancelou antes de qualquer resultado
+            return finalizar("", True)
+        registra_melhor(editado)
+        return finalizar(editado, cancelado()) # <= limite garantido por finalizar
 
-    # Resumo inicial gerativo (corte grande OU complemento do corte pequeno).
-    # Conta como tentativa. Mira perto do topo da faixa da rodada 1 para nascer
-    # proximo do limite (e nao curto demais).
+    # Resumo inicial gerativo (corte GRANDE). Conta como tentativa. Mira perto do
+    # topo da faixa da rodada 1 para nascer proximo do limite (e nao curto demais).
     if atual is None:
         if cancelado():                         # cancelou apos a deleção falhar
             return finalizar("", True)
@@ -597,16 +581,11 @@ def resumir(
     return finalizar(atual, False)
 
 
-def _extrair_texto_ollama(corpo: dict, aceitar_truncado: bool = False) -> str:
+def _extrair_texto_ollama(corpo: dict) -> str:
     """Extrai e valida o texto da resposta do Ollama: remove blocos de
     'pensamento' (<think>...</think>) de modelos como o Qwen3, detecta
-    truncamento por limite de tokens e rejeita resposta vazia.
-
-    `aceitar_truncado=True` e usado na LISTAGEM de trechos a deletar: ali a
-    saida e proposital e curta, o Qwen3 costuma repetir a lista ate truncar, e
-    os trechos uteis ja vem no inicio -- entao aproveitamos o conteudo parcial
-    (o casamento de spans deduplica as repeticoes) em vez de falhar."""
-    if corpo.get("done_reason") == "length" and not aceitar_truncado:
+    truncamento por limite de tokens e rejeita resposta vazia."""
+    if corpo.get("done_reason") == "length":
         raise ErroResumo(
             "A resposta foi truncada por atingir o limite de tokens. "
             "Tente um limite de caracteres menor."
@@ -629,17 +608,13 @@ def _ler_corpo_erro(e: urllib.error.HTTPError) -> str:
 
 
 def _chamar_ollama(modelo: str, sistema: str, usuario: str, max_tokens: int,
-                   *, aceitar_truncado: bool = False,
-                   url: str = OLLAMA_URL, timeout: float = TIMEOUT_API) -> str:
+                   *, url: str = OLLAMA_URL, timeout: float = TIMEOUT_API) -> str:
     """Faz UMA chamada ao Ollama LOCAL (sem chave de API), pela API nativa
     /api/chat via stdlib (urllib) -- sem dependencias externas.
 
     Desliga o 'thinking' (think=False): modelos como o Qwen3 gastariam todo o
     orcamento de tokens 'pensando' e a resposta sairia truncada/lenta. Se o
-    modelo nao suportar o parametro 'think', refaz a chamada sem ele.
-
-    `aceitar_truncado` repassa ao extrator: na listagem de trechos a deletar
-    aproveitamos a saida parcial em vez de tratar o truncamento como erro."""
+    modelo nao suportar o parametro 'think', refaz a chamada sem ele."""
     base = {
         "model": modelo,
         "stream": False,
@@ -683,7 +658,7 @@ def _chamar_ollama(modelo: str, sistema: str, usuario: str, max_tokens: int,
                 f"'ollama serve'). Detalhe: {motivo}")
     if corpo is None:
         raise ErroResumo("Falha ao chamar o Ollama.")
-    return _extrair_texto_ollama(corpo, aceitar_truncado)
+    return _extrair_texto_ollama(corpo)
 
 
 def traduzir_excecao(e: Exception) -> str:
@@ -1584,157 +1559,154 @@ COR_BTN_OFF_FG = "#bbbbbb"   # botao desabilitado (texto)
 # Logo (wordmark) embutido como GIF base64 -- branco sobre o fundo escuro.
 # Gerado a partir de CortaTexto_logo.png (invertido p/ branco, 133x64).
 _LOGO_GIF_B64 = """
-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
-sMHF/wFpnWjXVPL5TwAAAABJRU5ErkJggg==
+iVBORw0KGgoAAAANSUhEUgAAAPkAAAB4CAYAAAAwo1TtAAAgp0lEQVR42u1debhcRZX/3b79kpDV
+ACYRTEhCSAxgAMGEICKyqODC5gI6LAoDMqLDp4LLiDMDDqjIIjquIKLB0cgioKCgiYCiQDIKAhKS
+CDEJEBKWkPW97nuvf9Q5vpOTqrt0336v+70633e/fq/7LnWr6lfn1FkBTwOdKnTkodB318CjwHfB
+gKYQQER/vxbAUQAOADAZwDAAfwPwMIA7APxBXBMDSHz3efLU3lSlz6kAbiKwJynHHwAcIRZ/zwA8
+eeoAgB8BYC2BOAZQcxyxAPtlJN57oHvy1MZ7cAb4FgJujT7rFg5eJ5DXxe+3ABgiwO7Jk6c2AngA
+YBqAlxWwpbi+CsBK8X8suHkPfc5XUoEnT57aiIvf7eDg82AUbyMADAewL4CvC7BHCuifg9e6e/LU
+dvvwEx0Avzjl2rcAWK+4Ou/V53qge/KEtjGHVgD8icAZCYD/RCwEoVCqVQB00W9vALBJ7dETAPeL
+cz158oT+s4cDwIFC7GaO/CKA8RlOMQz00xT3Z2ngGL8/9+SpPUT1SwU4a8IklgegDPRbBdAZ7Pd5
+bu7JE9pCq/6AMovFAObQb2HOe8yiBSJSyrjZfm/uyVP/uiaPw/Zms2UFRWwG8G3iPiwRXOpF9s42
+uXjqfJBPAjBKmMMA4FECaqXAvQIAV1vufzjdJ/Jd7kHuqX9APoE+Y/Hb0oLjzKL5QgDPCU08AMwE
+8Cr63c8bD3JP/UBDLN89X/AeDOCXYUxxEOa4YbRf99GLHuSe+omT7yGAyvS3JpR4ixX4AWCKB7kH
+uae+JwbgSgsAd2ninsst30/13e1B7qn/6GXLdxOaWDRWWRaNMb6bPcg99R9ttIByN4sIn5c2WO7n
+Nese5J76UVxfBmCrigHfk/6OSpobfi/uQe6pH4hNZmuEiA2hjJtYEKB83kSLSc6TB7kn9J/veg3G
+rRXCHXUYgENyurVqGm/57knf1R7knvqXFghuzGL8qSJOvIj4f4CFuy9rYo/vyZMnNG8r3wXAZgFq
+jinfryA3D2G85XQOuJmeOXjy1P9S2c0ClBxcciu2DSdNA3dAIj4vEuzqutQHp3jyhLZIHHGYikTj
+zxNyAJ1BfKMlCu2bPgrNk6f2iSu/S4naEUzAyYwUoPN3b1YcnOPSD/Dx5J48tQ8330dw4VgAdpXY
+VwfElaviukkAnrLkiPujzwzjyVP7Af3zKr0yA30tgJMtYvchQtkWqRxvp3tR3ZMntJWmncH4cwJp
+t6XAwiMAvgbgSwDuseRe52IL6wCM9R5vnjy1Z3rmMTCFDBMhuscpxQ/l917h5skTOsOkNhLA9Qq8
+rFjjrK51VfQwEefs7xVunjx1hkfj6QCewbaFDrM4+p99dVNPnjpHdAeAVwI4D8BfFdg1yFlUv8iL
+6p48oeO07oDJB3cGttema+C/24vqnjx1ruYdMCmcr7ZwdP77MA9yT54GBtgvc7jCvs2D3JMndLxi
+LqRjsRDdeU9+lt+T+3hyT+j4rDKcHuoiS6y4T9zoQe5pAFAkEk48T1ydgT7Zm888yD1hQCSC5Kop
+jytuvkfBrDKePMg9tTl1q3kxG8DOvv6ZB7knDLg0UrxPHw3g3zzIPXkaOIv9Akuyic0ktvt4cs/J
+PQ1Arp4A2AHA/9LfXgnnQe4JA88VNgJwJIAP0N/eMcaTpwEiruuQ0zUAdlRlmDx5Tu5pgMyRBMA4
+AFfQXt3PG3RWeR1PfbfHlUe7tS3OIbafAuD7ABaK7zx5GtSgDjtsIV2QEmPO3/0FJlTVi+2ekw/6
+3OeR4nTjAewKUy10mCMx4kQAI9C3vusVmKSONzjE8EQsWBGAvQEcBeAWoYSL+6A+WuDos8TXZvPU
+1xFdEFlYTgDwbQAPwbiNJm163EJtvsdS/0wq3/j7GwlsXY6kFGVLQnnuLc/1Eobn5C1JrxQJV9Cz
+AbwDxiVUc524jThPnebA+hTu3UPiuYxam0PnnAJTkOE/hXmt2ffj59Yte/4xMBp+acdfA+OwE1nm
+duz97j2VaZ04AMB8lfW0LrKjxm3IwTlu/HrFyWMATxOId4dJA7VMcPUeAtsR9N19AA5ugqsHIq5d
+0mwAnwDwMwCPEqBr4ugBsJr0BD+GyV83B8BQ1RZvDfCEZnKmjQZwpVJW1doU1Fkgv5v+36rqkwPA
+FAAvifeaAWCWEumvov7gBbAqdBSBQwKqWvQSHwfw/02811IAF8O448Jnt/HUzDbndaS0StQetlMO
+DfIFqtQxa9GZM35PXLs7vT+XYooFwI7P2NpULBLRYQCuo61DIvqU88LLo2b5vmZZXDcD+AEtUPAW
+AU9FAX48gI0KLEmHg3wh/f8rB8hlkYZpAPZz1E5LANwJ4EMA9oRxpBlq6ceZJI7/ydIuWQAiz+JZ
+t1zHv70I4CPeCcxTEYCfm5G3vFNBfrd4p8PVu+8DYJMAtA3kiUX/EJOY/3eY6qh30/GEui4W2vvY
+snBuBfAkifG3A7iDpKjVljGoi3bI+9yEXhOlB7onJ8BPVGalZACB/B7xbutpMZsNE1O+RgHaBXIJ
+tHrONkSOemzrYEyQx5HIPdQyLiNJP3ASgGtJYZgoU2Asqrv+lq7xlWE8WZVshxBH6VGiYace3fQ5
+T4Hctf2IBZdmkEcZfcFacL2vjhz113iPfwmM85BrPFyKtB1hCkc8qtotyzjfhV6Nvge6p3+u+FNo
+b5cMwOMGhzNMTYnREjC7wxRDLPKcNM7OAF9Ji6mUoMIUpVmgUkszDQXwGQBbLAtIAuArg0Xr7lex
+/MkTJgJ4DU2SygBK4hgAeI4430IAh2bEjfM1s2iPPFs4ydj6ble657HEZW1RbHLf/QaYQotDhETR
+qDMNqH23kfIvFo5LAYyL7l/pO+8042lQ0IIcHJc5+X4F770Lek1wdYdu4DL0avXLWJzZ7XYWLWRa
+qXedt6F7cnllDbSj2gDI9xVAyrq3dHg535GYIgZwkCUGoFlioL9V6QoSGK3/jl6q9YRBnhkmDeRF
+TFEVAbifqucwd53ZIvMWLzI/t2j0jxjo3NzbCj2hD8NaI5pz5wHYIPQdMQFxN4dHXFmS2E9VexIA
+ew10Tu5B7qkv5w4rvp6CsX9XVPTY6S1SgLEUskRx7QB227sHuScM5pJKAYxP+FpLgcQiRRavgDFv
+hUK7fTyAt5AY39UCM+gMbFv/LYGJ8/cgTwky8F5Dg5N6YPz2m8lG8zRMaG4gTFoBgB/BaO5rBPSg
+JIAnAE5VczgA8FiDixUGqlYZGVk5vGSwbZhltUMUOnkVb7HQSu/UxF6WATaNuLms2JKQlHAktlWc
+VRr0VOT+P8vi1/4cesszB4NgnJ3g1jSWxJ4ZACZg+3jgwe4qGKDznI76GuRyX/wpume3xXf9S+I5
+ElShkiQD5flWVe06T5nO2E5+ZRMZkjpxnJ1i/AiYAIFrYHKVrRODvR4mmugmAGcCePUgD9LnftsL
+wLdgAj+O74AJ0B8gl+D6gXI5lT7yqwFcAONGW5TeiN7w2VgFFq2D8YJrZMvJ50+GSZRxPUwWnY4B
+eigG4KPoTfuT53gRxmvplYMQ6DxZXk3ipuyXE9q8P/oL5Mx9h8Akh5TitG7HZpjAkgtgbNtTqQ3c
+72MJdG8D8AUAD1p85iPx93FNpKqqABgF4xIr++fcTpj3vLLOhIn9dQXk66OuIpdWAXj7IAM6991J
+1Adb6Ihh8o+1c+LM/gI5FCe9HNuHoMaOqLgeAM+TJPkEceZuS3vrlnt8rIm5yde8SWwzOJrvEbRv
+AY1tGn8YgBcsnkGu+OAoJdj/vEGUFZbf8X2iH7gvfuBBnos7gpjDI5a49Egxm7Rotpq4Rs7H55rg
+4BonhwtlIbdnmXiPoN0Gl50SDoJx/Rsr0vVyCZ1QpOhdB5NEYJNQdrCZoipe/su0atYHoejuo/1Q
+yP7Oc+wXAF5PDGKJmHcy1DS2xKfXBbOBMPNWYaLbvgsTGnszyinxZCvlHLez0qVCK/MKyx4mERk1
+TiMFyCtgsnLuCuCdpHioO/yRY/TGB4eDhJMnipP/0HPywpwSMLXR3w3jjvpsA3HyT5KOaGaJCmEp
+8eoMQUvbkZNXhTPCV2ES5dcFN64Qxz5X7CslvQyj/byN9lPfgknlG6nV9zvoTd8b+LI2nlIoEuL7
+FpiEFjcQY9kfJkPsTFK8DYcx44JE8U0AlsNYgR6gz80CnPFgLtI428HB/w5gekoebV3Ub5iI9Kkr
+m+TZA3x/7jl5/zhiDUW6/3nZxRU6jpNzgz6sHPk5S8fxMJrLIZY0QFrxxnuf99E1FSENsHlhiC93
+66ngvjcS3F3GpzOzYe12YPFAC4SGHoPZ/XIsTJVKWYc6pL3MIhj/4R7kr6u1CcA5YiVjkE8nhUrS
+pM986FDGtDIVln52JYc5KKs+edCChBWVDisOKY8gJ+DritkE6t3rytbeCumhVeOcd94X8iqtEPAm
+iA4JYWJ9v24JBcwD9AqM08Iiwc15QN5cMDBGdniiTBYy22fYhDuttAzoe7ierfOUVcRiFqeEOmrT
+T5BDERQojpZ2xE36eveFPz8s4xiJ/qg2sAC6xqWRNmrpwbY4JSm4iNTWJmlQ4cf9lTTbX1X05uqK
+RWN+D6PNbMTUwB01n5RwsRiM/QpE/ITYtsb3KJikAuPFOc/AxCZvtlxXZIKAthI94h1iy7PZDfJp
+GG8nadLpIZ3EEEc/D6PPuvh+q5hMSQrAQwBzM/aePdQXK8UzwjaooiqrvvJc2A3GO60q+mEZjJK3
+SNvZvLs3MaonSI/USGJGvmYnmqcbYRzCoExkPTQOwxztGS7Cafkza5xtkkCc0l8baKyfU/3lnPdX
+Kq+2BMBFYpVoVAH1FosTzR9zKiVCoVQ5Eaaq5WqHImgFgO/TliMosGryiv82AL8D8Dfqix3EOe+E
+CX1che0TD54tznsdgN9QW9ZZ2rmJwLeKPlfSZLwPvemHKg5wjAbw65wmo80wFUYuhClPlNds1CrF
+m3ynPQF8EUbjvcVy75dofnwW28ZAVDLu/RnB2darrWdRZdoBap5drX6fCmPOY4DZCkWsVMcKeuf3
+55BiZZv3gwnQeZgWCVt/3Qvgk9g2P731/pdZQP7JJrTBoSirowsB3pcxMeQe5p30gjaPJlf1kt+r
+LUGQMUEmWTrwQhrsP6R4U/GEGkkr98omcp5vcARKcN9/DL1unFniunb7/DrpXLImfStAzs8bB2NC
+3ZIyjlqZ+wJMzfNhjrZzeyeItnaLeuXjlRddni3hCOGL3iP6c45ow71N5rffPwWIPN6vgqkEExfo
+r+dhEmSGrvtfbgH5p5oAOV9zlPJMyuLkcpJfBbtbYyyUL/p/OTE/lwF07oxD1aDWSUyrqWfH4lmy
+ouZImISG8h6xAxy2/TNPzGMt/V0Vi3Ak4q5dR6TayM9ejmxnpLJBzm2fC+OQYvNHj3K0/UESU3Xb
+ub27i7GRLtV3FeDm3NbvqEi4ugoumiSq59RTSlPbFt+tdM35DlxxO48WZZ7iHP2lY0buhqkPsB3Q
+bSA/vwSQf0CY4rrp/vemiKas9Lre4jcfpUw8HbXEf39DOfzYOvUNKllB4ohcsgVI/JruO464cZIx
++LE65DNfY+kXXqBmF6y5JttQE1wuTYwtE+Rywm5R9drjjBJM0luyR1RUma7aKaPXHnT4ZeSZw/zb
++9W1sprLWHrWDrSly6o/bxtnPvdoyxiEKrBJtiOtvyJHfy2hBWmb+VQ2yCuicsZLqmEfzljJvq1E
+Lz3hNsBU+riLRKvNlvMkh/wvx8Tm/w+2aL2lNUA+u5s68C4Sg3cWnXiKqqud99hCe1CXCCf1BjfB
+eBb+Aqaqpzx+T/tEW9mhuui76Y5nlQXyith/v5TiIp3ApF26HaZM8nJH/9dE4MdOKpMrf75WZZeR
+/hxzcyxsk2FCpG1JJQ5XuduPbnBrVgPwNUsm2lDEvWvHmsjiovtbWtSedVSR7RF9O0pKsmWDXHbg
+HBrEPwL4d4f4zC/6HtVQOUEeh0nfoxUMk+i+Kxx+8wlxa9fqeXBKVU6+fgWM3X93x2Th95lIXPez
+FoXjHfTbXPp8PX1OyWmjz0M70J7vu5aJwu1Y5LCnlwFy5q7DSNFk44w9NNn3UW0YChMc9aOUIoU3
+p4zjOY7nLaUtlZ53gTAz/tYhCXxRYSAQBRW50qsG5koAB9Lvc+hzNoA9UqwOo4WEoBfEbtq6zlKW
+lTEkmd2Z0l/Xyj5qBcjzTk7eh4+mDootE/MbSuNt40Q7wbiOJpZAmQcsSpgskNdFPeudHfbLwNGe
+Yyxurdc2mUwzywlG9/WbBWfX3OkjlrEtA+R8v7MdgHucAJDlcnq8KCypOfphFqDzc29Q5/I7fD9F
+33GR45r7iXunjfNcC8iXFBhnbsOFjv56jBYIm5Qs6UMinl3318GtEtdtEW4uc1xVNNTW2VdZgmn0
+AiHvO98B9HeoyZEGcv77RvG8rhzedVwu6CQLyOfRb0PRGg81GUfQJcw96yxOPEtpLxuUCHI+hhFX
+0orGNUIK63JwVtn2Q4SySorfCxy6iwpx2KcUo6ipLK1V5XseKXBFpHidmqEFD8n0afNd7xLut2GG
+5PRK0oxHav++QmRXSusvnvvHKp0Gf97aFyDPK9YvFI3kF31IeBhVcnA6Fn1WKE1tTBw5D8j52U+R
+aSwoYG/tiwAV7b8dOtwo2SHnBMv7yb1mWBLIQ+UboZ93nNrbptEQYf/WW7A67KWUdLaWmtqfvyxy
+xIW0IKx2SDonZ2jmywhQqYpiEolloTm0gf660lJbfhOAqZV+dnOMaYWfI0Rqdte7SHkOISM8sUKD
++SWV6CIgMXGkw1URlkQAXyalXtgmATWBcHGMLP7ZttRIIGnkHuVxlsAU/0ML/P6PVibDCuljOFFD
+Lce9anTdVTDOQzJENCQga5BH1D93w+R3q6qxHkULLY/nd2GqrLIbNsddXEfnVVs87olaFAPRX78k
+PUE1Z3/xO1xCi690wx4O4NBqG2RP2Yv23NKtdjVMyGpQoLN5UG8FcCm9YCIcDCajNweXq+NDEhNv
+ybm4oI/ScjGwh5By7UAY+/wrhF3U9V7j1aIakOKrzIICsSgRHCj3zXkFAzV4HDaR9v1MVf98Dkze
+gsQy/iFZVN5EGutI1CqfS9LB32nfL/MmVEmDf04fLex8/72VGytgTMhBwb4PaUt0B20X6+Ies9sB
+5JNU+RyQSWVrQR9kXhFX04DNUmmFGOQVx+Tm65fC+MSjDXy+eZGbCOAMGsA9SlCE7iI4ZBntjNWC
+IhWdD6qIxCL+7vcTyLWSNa3eWUwi98MkvcmUZBeJc6vKknIy7cfDFo87L4A7EvORInwC45acFBwb
+nisP0xyR4z212kfBCdrh3ia6SFrXhDiZqCAQ5Cxsz+1Yi95oprgfAc4T8KMA/hu97qkyAioPh5Tn
+8OfOpATcXHJyA1ljjAG9JmXssySDp1R/IIPL8oK+ghbF+YJjVywLHov5n6VtRdUxd9CiJCNdKX3Y
+SEHHFZb+Sqp9FPQPy8PTgPZMk3vGIOdikhUk0J8cvAsmQOJktfcKxAKUNNgfrYpMCyzPu1ksJkkD
+3A5qwQ1yLDRVmECSqwnskWVc+bzbSQdT7WP9S9KCMdiQpuVrFScaCuBdxIV+DWNeyTPY1X7ORoJ+
+VkhGMPbdk0iUrCplUqtqeBf1asxD+5Wc0CPJKVFUYIJ7DiS9j4w1Z0ljFYB/FZJmMhALmLYS5ENh
+XDDZgWE9jDbxwRwTdLAmemSlz6kE8B6xzZDcaDGMJvkxsbVxWS+mAfhKSX3Keos16C35m+QQvZMS
+8rFDKMnyKu+2APg0jBI3tnDxL8IEhHTl1GSjk5MPln3POowt9jCaqDGMK965MMEAITy5FFgjYLyg
+YpVJJYTxm78Exq8gL80kkJdJW3OmBGtWLE2EQjaiBe/5nK7Aidhv23zsWd/xYxgPuwGbRbiVYvEI
+ISKxxnKyhSuh06tDliymvx3G4hAJDXgFwPdgnCe0A0qSIRWMaUFb1xcYp7IW9BDGbfTCHOZNNptd
+CuMTH1lCVSOYyrzfhsnt3pdKt7YAeVDCnna50qwXsZXWMXhLHh+qzEHsUHK66M8oZx9FJSuTeGxX
+KrCkbbfOhzFrNmutWAuTyGNjBsgZ4EfDJD+pi3meqEWyDuMVeCZMPHmnAz0uAvKon+t0j21yb550
+QM1y1wDNUA4SFRiHEhTwGkOLlZKPFHiveei1lpSp1E3TQ4yDKbWdKGWbzMlXEdLO5TDhuo/2oZdj
+K4oijigSATWphMZPsSwYtQwA8N+7NgFWl7950o/a+ajBMkFMG5t4h7AF2ttFjvYkFgeZPYmZDBFW
+gkaOMMe+mffa18CkhoqF22oAE+b6H+q7gMBxPXrt1kEfMJK6Q2qoNIG53SwLWlCh1csmMjbq1pmo
+9MuyQ5aJicffrbKsbFNgIpqSAqtdIHKKTbNM8hV9VJTOBqpxBZ7d41ihgwYHfp+SpLNExAcstmT4
+BYzLKJTzyxuxbTRZo0dWHnUWtT8BE3VYFzqNKown46cAXCwcXyIB+H2Io0c5F8awQSUj//6CknAi
+MV5BA2BPYNxk9XNWVGhVrotIrhgm28abhCmiqCg1mpQZUPHO91ka8SiMtlZWvJgkAhHCAuBKYILp
+R6gAhedhbPSt5OiJ4rpyoPaGMSkmOZJLLlF52UELZlEtNZ//3pKUmWwKuxfGbBcqzi05vHyfU3O8
+exkLax3Gr/0SAVQZLHMKjEmtAmOefFEwMl4gzoHJB5BWhTcRtde0rmmCSMqZZ4FYpgKLIEKVi1pl
+hqM38EguEA/wAx9SyeISkY+tSLJ7tul+2RKyuEWI4YHiNossSR/vKfD8iohHXmIJNb01R6gpP3dh
+g2ITt3GyyM4hY3yPztCD2MIPmSNuholxzhv62iVqaNtCP1ejNxFHkDPUtK5CMauODL2RJX3WhWJ+
+lA10mW11iSN89DxLPPmJjjDPdQRWFzfl9o+E8RfQeQDPyhEmmpZgowaT4juv9Ysx93kH5v4Z63Cu
+I2nDxSozSRrIukQq5cgS8P9zC3iqGc+/UD0/cIRgBipHnA6ef496XitALhetxWrR5Pj4rpSFi5/3
+agJ1rBaJX6Uk0LCNwwRsn0ShUZAzcNeQlBaktP9elVCS73WaJfFCJeeRJzb7Gscc+pWlz/iaax3X
+3JVRnSQU2Wh0VtUn0Wu27EoZJx6jjSppREKKzbR7BGqsD1fZgrnv75AXjKL9QWRJv3SxBVRVVXgO
+ImFCtyMZ30EW8Zsny460gtqe/wUH19Y5wq6y5MniTCg7qInZKpC7Fi1+p5+pFT5U3IU/f+y4/npl
+93bV7ZoJ4C8pWW+Kgpzb8ZkUDsNtONKScZSfewFxwLJcNvmZ/5LClXe1cGXut+EwXoM27v/pHO96
+jCM32z0wYcC22m+u5KV6rO8TfiVpY30UTFiuDXNHulLC2hIp/oYUKC6aDhMM4Eoqd03K/pq/+2DK
+8xeSuDtKXfsKWlgWWyYn3+ftORM5lsnJx5Ciz7ZoPUCdPzQlYm+mSn8kr18Gk0TwVZbnTyMgbXDk
+rmsE5PwOz1F/BzkKKlyrxkBOwOW0WBxEuoq9Mo7poq9sKaumwDjn2HKcHZdj3u1P7dRpo+uwJwHV
+wH3AIT0+AZOWfLhD3GcpZZxK0yXvsQ7G1r+bhZnsC5P8woW5+brt/McPU4DGye6voEl2KnH5O0UK
+ZNtq8ijtlyo5JsdPMp6/CibQZT6B8RnHed0qR1yelMxlgNy2ytccKZ6XwSSn+CFtcbT576OiL2zX
+r6fF7afUH39S1WBshfcaATmP4xk5FKHc/tFi8rvGskg64+XojYGQkXhDSVNuy7b61QJ5189zcFNO
+BZ22PdnXUtlEvudTtFX9kcg1pyXKd1nqBkQqjdODhI9blHLWlvCSc8RtE8gkRYH5jskVIzupv+ai
+T9gSvadMji4SaXWpmrRUR7pj+EWvU0UbsoorcPsXNAlyef8LHIUibH15hBLhQRNVp3eOMsDiWlQa
+Abnsk7xKv0A4NN3veP9ajvmkJ/DTQh/AW54zHeB8SCTNDHKk1QIBUd6LP/8nh9h+lmVsXOP0YYcS
++IyCxRUSR3GFp2EcqqxzWCYCnJdS2qamjrqjOsZiAfCwgKhbFVVUXKV1ahnlYr5ZsEySfJfflQBy
+G9Bd78KFAeYpBVGo0gbbyjbVRdsji1UhEWV9ZG641eitM+YCOXOnF0hcLGK75fNGC+lQAryesxRz
+pBbuaUqj/B36rVv0xVaYrEBFCl8GpAR7Vjyvh44bc1pFzlYcta7GeSt9vyAlrfQH1FbLNtZpZaX+
+IrTpYR5XuzNUpYbYAvCaWqV5Ul0uOEWlQVe/s1QdrcQBcvn74zD5u/IWPJxiWSmvKjF4h+/xXsu7
+1AXIExhvLJ3MvyKUWYscZYXkAqVX+htJnFypuOLNGdla5Zge1UR9bYj3X9xkscBnBCevqoIc8jir
+gfHjd3uH5X6fLCD2HyoKS+g5y1up2xz3qwoPwV8WHOuNMNlaR+UdKzm5xpP9bUmOQVhLK+usElz0
+KiLL5kdg/Io3Op67nvQCp4uFpUjp4pNocVhLe56xJfsVh0JJ+HHaO3erd1hNCiYbtwzFJDgGwP8p
+XYQ+VsBErB0i7nEwgD+T8ux2UtoFltxrC5Tod1qTC16gUhQfQQzgXtKvrMs41lKb/6z25PLzAmJG
+K2FcVht15Q1FFdknyVx4BUk8lYLlts+gvtyM7csNH5QiFcl2v5Wku9Up27LHYLITT0vDXJAjgQE3
+/HUwJX33FCYpNlEthklAt7ZAAfm8CRQg/NlnkOZ6HA3segLosynXIWfc8UgaBLQwGQRENc7ppNQJ
+yZb7bIpvtr5+DA3sRDI/BgSKldQfm5U0Ewmt/0spgR13CrPLB2Gy05QRmWUbkxE5F49AtNnVP6OE
+VNRMXDj3w1A6Xm7wegjHqBk0RiNgEn0szRFkIz3gRsEUxNyVlGk9NNZPkEIybhZzQQNiT6UF+cbz
+eLxVG+S+YYNpjcruyyCnZ1dev+rQsbqnaYoXkVh5bAvyDcjCEEFZqY0cptGyYg/CBmMGqjm2ikXH
+MG2rUCl7gNIihNDipAqhpQRN0KZhf3nepdrgpA8s9wgzFqkg47cKiX4H9FGevaDg0ZfjV9b99Bg1
+s30tMtaePGVKEj491wCifwBqsY/LWSNDiAAAAABJRU5ErkJggg==
 """
 
 
@@ -2205,16 +2177,6 @@ class App(tk.Tk):
                            max(MAX_TOKENS_MIN, int(limite * 1.5)))
 
             def chamar(sistema: str, usuario: str) -> str:
-                # A listagem de trechos a deletar usa saida CURTA e rapida: o
-                # Qwen3 repete a lista ate truncar, mas os trechos uteis ja vem
-                # no inicio e o casamento de spans deduplica -- por isso
-                # aceitamos o truncamento (aceitar_truncado) com num_predict
-                # baixo (~8s) em vez de esperar uma lista "completa".
-                if sistema == _SISTEMA_DELECAO:
-                    return _chamar_ollama(modelo, sistema, usuario,
-                                          NUM_PREDICT_DELECAO,
-                                          aceitar_truncado=True,
-                                          timeout=TIMEOUT_DELECAO)
                 return _chamar_ollama(modelo, sistema, usuario, max_toks)
 
             res = resumir(

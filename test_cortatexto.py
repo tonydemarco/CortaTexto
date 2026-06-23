@@ -9,8 +9,6 @@ exige o pacote `anthropic`.
 Rode com:  pytest -q
 """
 
-import unicodedata
-
 import pytest
 
 import CortaTexto as ct
@@ -380,10 +378,9 @@ def test_extrair_texto_ollama_vazio():
 
 
 # --------------------------------------------------------------------------
-# CAMINHO DE DELECAO (corte pequeno): Python conta, LLM so diz o que remover
+# CORTE PEQUENO: o LLM micro-edita (qualidade) e o Python apara o excesso
 # --------------------------------------------------------------------------
-# Texto com 4 sentencas + um aparte entre parenteses (da material tanto para
-# os spans do mock quanto para o fallback heuristico deterministico).
+# Texto com 4 sentencas + um aparte entre parenteses (material para o aparador).
 _TEXTO_DEL = (
     "A reuniao, que estava marcada para as nove horas da manha, foi adiada "
     "para a tarde por causa de um imprevisto. O diretor (visivelmente cansado) "
@@ -391,172 +388,130 @@ _TEXTO_DEL = (
     "nao voltaria a acontecer. A equipe aceitou a explicacao sem reclamar "
     "naquele dia."
 )
-# Trechos que existem LITERALMENTE no texto (do menos ao mais essencial).
-_SPANS_DEL = [
-    ", mais uma vez",
-    " (visivelmente cansado)",
-    " sem reclamar",
-    " naquele dia",
-    " por causa de um imprevisto",
-    ", que estava marcada para as nove horas da manha",
-]
+
+# Saida realista de uma micro-edição (varias frases) usada nos testes de aparo.
+_MICRO_OUT = (
+    "A praca, recem-inaugurada, virou ponto de encontro. Tem bancos, arvores "
+    "e uma fonte. As criancas, animadas, brincam ali toda tarde. Os idosos, "
+    "por sua vez, jogam domino sob as arvores antigas. O lugar agrada a todos."
+)
 
 
 def _subseq_sem_espacos(sub, full):
     """True se cada caractere nao-branco de `sub` aparece, NA ORDEM, em `full`.
-    Como a deleção so apaga e normaliza espacos (nunca inventa caracteres), o
-    resultado fiel e sempre uma subsequencia do original por esta medida."""
-    alvo = iter("".join(full.split()))
-    return all(ch in alvo for ch in "".join(sub.split()))
+    Como o aparo so apaga, normaliza espacos e ajusta maiusculas de inicio de
+    frase (nunca inventa caracteres), o resultado fiel e sempre uma subsequencia
+    do texto de entrada por esta medida -- comparada SEM diferenciar
+    maiuscula/minuscula (a capitalizacao de inicio de frase e ajuste esperado)."""
+    alvo = iter("".join(full.split()).lower())
+    return all(ch in alvo for ch in "".join(sub.split()).lower())
 
 
-def test_spans_de_teste_existem_no_texto():
-    # sanidade: os trechos do mock sao mesmo copias literais do original
-    for s in _SPANS_DEL:
-        assert s in _TEXTO_DEL
+def test_aparar_ja_cabe_retorna_igual():
+    txt = "Um texto curto que ja cabe sem aparar."
+    assert ct._aparar_para_caber(txt, 1000, 20) == txt
 
 
-def test_corte_pequeno_usa_delecao_e_fica_no_topo():
+def test_aparar_apara_excesso_e_e_fiel():
+    # texto acima do limite -> apara para <= limite, mantendo subsequencia.
     orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40                 # remover ~40 -> r pequeno -> deleção
+    limite = orig - 30
     faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
-    chamadas = []
-
-    def fake(sistema, usuario):
-        chamadas.append((sistema, usuario))
-        return "\n".join(_SPANS_DEL)
-
-    r = ct.resumir(_TEXTO_DEL, limite, chamar_llm=fake)
-    assert r.caracteres <= limite                  # invariante
-    assert r.caracteres >= limite - faixa          # ficou no topo da faixa
-    assert r.sucesso and not r.cortado
-    assert len(chamadas) == 1                       # UMA unica chamada ao LLM
-    assert chamadas[0][0] == ct._SISTEMA_DELECAO    # usou o caminho de deleção
-    assert _subseq_sem_espacos(r.texto, _TEXTO_DEL)  # fiel: so deletou
-
-
-def test_corte_pequeno_estavel_entre_execucoes():
-    # mesma entrada + mesmos spans -> mesma contagem, sempre (deterministico)
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    contagens = set()
-    for _ in range(5):
-        r = ct.resumir(_TEXTO_DEL, limite,
-                       chamar_llm=lambda s, u: "\n".join(_SPANS_DEL))
-        contagens.add(r.caracteres)
-    assert len(contagens) == 1                      # estavel entre execucoes
-
-
-def test_delecao_spans_nao_casam_usa_heuristica():
-    # o LLM "alucina" trechos que NAO existem -> sao ignorados; o fallback
-    # heuristico (deterministico) ainda produz um candidato fiel que cabe.
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
-    cand = ct._tentar_delecao(_TEXTO_DEL, limite, faixa,
-                              lambda s, u: "trecho que nao esta no texto\noutro")
-    assert cand is not None
-    assert ct.contar(cand) <= limite                # nunca passa
-    assert _subseq_sem_espacos(cand, _TEXTO_DEL)     # so material do autor
-
-
-def test_delecao_lista_vazia_usa_heuristica():
-    # LLM devolve lista vazia -> fallback heuristico assume; candidato fiel.
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
-    cand = ct._tentar_delecao(_TEXTO_DEL, limite, faixa, lambda s, u: "\n  \n")
+    cand = ct._aparar_para_caber(_TEXTO_DEL, limite, faixa)
     assert cand is not None
     assert ct.contar(cand) <= limite
     assert _subseq_sem_espacos(cand, _TEXTO_DEL)
 
 
-def test_delecao_resultado_eh_fiel_por_subsequencia():
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
-    cand = ct._tentar_delecao(_TEXTO_DEL, limite, faixa,
-                              lambda s, u: "\n".join(_SPANS_DEL))
-    assert cand is not None and ct.contar(cand) <= limite
-    assert _subseq_sem_espacos(cand, _TEXTO_DEL)
-
-
-def test_parse_preserva_numero_legitimo():
-    # trecho que COMECA com numero+pontuacao e parte do texto: nao pode ter o
-    # "5." removido por engano (deixaria um numero orfao no resultado).
-    texto = "O artigo 5. trata de regras importantes para todos os casos."
-    spans = ct._parse_e_casar_spans("5. trata de regras importantes", texto)
-    assert len(spans) == 1
-    a, b = spans[0]
-    assert texto[a:b] == "5. trata de regras importantes"  # casou COM o numero
-
-
-def test_parse_remove_marcador_de_lista():
-    # quando o "1) " e marcador de lista do LLM (NAO existe no texto), deve ser
-    # removido para casar o trecho real.
-    texto = "A cidade tem parques bonitos e ruas largas no centro."
-    spans = ct._parse_e_casar_spans("1) parques bonitos", texto)
-    assert len(spans) == 1
-    a, b = spans[0]
-    assert texto[a:b] == "parques bonitos"
-
-
-def test_achar_trecho_casa_nfc_e_nfd():
-    # original em NFC (padrao macOS); modelo devolve em NFD -> deve casar e
-    # devolver a fatia ORIGINAL (preservando a contagem do texto cru).
-    nfc = unicodedata.normalize("NFC", "café")
-    nfd = unicodedata.normalize("NFD", "café")
-    assert nfc != nfd                       # de fato diferem em code points
-    texto = "Tomei um " + nfc + " quente hoje."
-    rng = ct._achar_trecho(texto, nfd, [])
-    assert rng is not None
-    assert unicodedata.normalize("NFC", texto[rng[0]:rng[1]]) == nfc
-
-
-def test_delecao_falha_conta_tentativa_respeita_orcamento():
-    # texto sem pontuacao -> heuristica vazia; LLM "" -> deleção retorna None.
-    # A chamada de deleção DEVE contar no orcamento (senao estoura max_tentativas).
-    texto = "lorem " * 200            # 1200 chars, r=200/1200 -> corte pequeno
-    limite = 1000
-    calls = {"n": 0}
+def test_corte_pequeno_usa_micro_edicao_e_apara():
+    # corte pequeno -> 1 chamada de micro-edição (_SISTEMA_MICRO); se a saida do
+    # LLM passa do limite, o Python apara ate caber, fiel a essa saida.
+    orig_in = "z" * (ct.contar(_MICRO_OUT) + 30)    # entrada -> corte pequeno
+    limite = ct.contar(_MICRO_OUT) - 15             # micro-saida fica ACIMA
+    chamadas = []
 
     def fake(sistema, usuario):
-        calls["n"] += 1
-        if sistema == ct._SISTEMA_DELECAO:
-            return ""                 # deleção nao consegue -> None
-        return "lorem " * 180         # gerativo nunca cabe (forca uso do orcamento)
+        chamadas.append(sistema)
+        return _MICRO_OUT
 
-    r = ct.resumir(texto, limite, max_tentativas=3, chamar_llm=fake)
-    assert calls["n"] <= 3            # deleção contou como tentativa
-    assert r.caracteres <= limite     # invariante mantida
-
-
-def test_delecao_fallback_em_erro_transitorio():
-    # timeout/truncamento do LLM (ErroResumo "comum") -> cai no heuristico e
-    # ainda entrega um candidato fiel que cabe (a deleção nao depende do LLM).
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
-
-    def fake(sistema, usuario):
-        raise ct.ErroResumo("O Ollama demorou mais de 40s para responder.")
-
-    cand = ct._tentar_delecao(_TEXTO_DEL, limite, faixa, fake)
-    assert cand is not None and ct.contar(cand) <= limite
-    assert _subseq_sem_espacos(cand, _TEXTO_DEL)
+    r = ct.resumir(orig_in, limite, chamar_llm=fake)
+    assert len(chamadas) == 1                         # uma unica chamada
+    assert chamadas[0] == ct._SISTEMA_MICRO           # caminho de micro-edição
+    assert r.caracteres <= limite                     # Python aparou para caber
+    assert _subseq_sem_espacos(r.texto, _MICRO_OUT)   # so apara a saida do LLM
 
 
-def test_delecao_propaga_ollama_indisponivel():
-    # Ollama fora do ar / modelo ausente NAO deve ser mascarado pelo fallback.
-    orig = ct.contar(_TEXTO_DEL)
-    limite = orig - 40
-    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
+def test_corte_pequeno_micro_ja_cabe():
+    # micro-edição ja devolve <= limite -> usada como esta (sem aparo), sucesso.
+    orig_in = "z" * (ct.contar(_MICRO_OUT) + 40)
+    limite = ct.contar(_MICRO_OUT) + 5
+    r = ct.resumir(orig_in, limite, chamar_llm=lambda s, u: _MICRO_OUT)
+    assert r.texto == _MICRO_OUT
+    assert r.sucesso and not r.cortado
 
+
+def test_corte_pequeno_propaga_ollama_indisponivel():
+    # Ollama fora do ar na micro-edição -> propaga (nao mascara silenciosamente).
     def fake(sistema, usuario):
         raise ct.ErroOllamaIndisponivel("Ollama nao esta rodando.")
 
     with pytest.raises(ct.ErroOllamaIndisponivel):
-        ct._tentar_delecao(_TEXTO_DEL, limite, faixa, fake)
+        ct.resumir("z" * 400, 380, chamar_llm=fake)
+
+
+# --------------------------------------------------------------------------
+# Salvaguarda de fidelidade: nomes proprios e numeros do original preservados
+# --------------------------------------------------------------------------
+def test_fidelidade_detecta_nome_e_numero():
+    base = "O evento em Paris reuniu 19 artistas no centro."
+    assert ct._fidelidade_ok(base, base)                       # identico: ok
+    assert ct._fidelidade_ok(base, "Evento em Paris com 19 artistas.")  # tem ambos
+    assert not ct._fidelidade_ok(base, "Evento em Monaco com 19 artistas.")  # nome mudou
+    assert not ct._fidelidade_ok(base, "Evento em Paris com artistas.")      # perdeu 19
+
+
+def test_nomes_proprios_ignora_inicio_de_frase():
+    # 'Hoje' abre frase (maiusculo so por posicao) -> nao e nome; 'Paris' e.
+    nomes = ct._nomes_proprios("Hoje fui a Paris. Depois voltei.")
+    assert "Paris" in nomes
+    assert "Hoje" not in nomes and "Depois" not in nomes
+
+
+def test_corte_pequeno_refaz_se_perde_nome():
+    # 1a micro-edição perde 'Paris' -> salvaguarda refaz; 2a e fiel -> adotada.
+    orig = ("O grande evento em Paris durou tres dias inteiros e foi um enorme "
+            "sucesso de publico e de critica especializada naquela bela cidade.")
+    limite = ct.contar(orig) - 15                      # corte pequeno
+    saidas = iter([
+        "O evento durou tres dias e foi sucesso de publico e critica na cidade.",
+        "O evento em Paris durou tres dias e foi sucesso de publico e critica.",
+    ])
+    calls = []
+
+    def fake(sistema, usuario):
+        calls.append(sistema)
+        return next(saidas)
+
+    r = ct.resumir(orig, limite, chamar_llm=fake)
+    assert "Paris" in r.texto                           # adotou a versao fiel
+    assert len(calls) == 2                              # refez por perda de fidelidade
+    assert r.caracteres <= limite
+
+
+def test_corte_pequeno_fallback_quando_nunca_fiel():
+    # micro-edição sempre perde o nome -> usa a 1a como fallback (cabe, editavel).
+    orig = ("O grande evento em Paris durou tres dias inteiros e foi um enorme "
+            "sucesso de publico e de critica especializada naquela bela cidade.")
+    limite = ct.contar(orig) - 15
+    calls = []
+
+    def fake(sistema, usuario):
+        calls.append(sistema)
+        return "O evento durou tres dias e foi um sucesso total de publico."
+
+    r = ct.resumir(orig, limite, max_tentativas=3, chamar_llm=fake)
+    assert r.caracteres <= limite                       # invariante mantida
+    assert len(calls) == 3                              # tentou o maximo (3) e desistiu
 
 
 def test_ollama_indisponivel_e_subclasse_de_erroresumo():
@@ -567,7 +522,7 @@ def test_ollama_indisponivel_e_subclasse_de_erroresumo():
 
 
 def test_corte_grande_ainda_usa_gerativo():
-    # r alto (resumo de verdade): NAO entra na deleção; usa _prompt_inicial.
+    # r alto (resumo de verdade): NAO entra na micro-edição; usa _prompt_inicial.
     sistemas = []
 
     def fake(sistema, usuario):
@@ -576,7 +531,7 @@ def test_corte_grande_ainda_usa_gerativo():
 
     r = ct.resumir("x" * 1000, 280, chamar_llm=fake)
     assert r.caracteres <= 280
-    assert ct._SISTEMA_DELECAO not in sistemas      # nao tomou o atalho de deleção
+    assert ct._SISTEMA_MICRO not in sistemas        # nao tomou o atalho de micro-edição
 
 
 def test_remover_e_costurar_invariante_e_costura():
@@ -597,6 +552,33 @@ def test_costura_conserta_virgula_dupla():
     out = ct._remover_e_costurar(txt, [(i, i + len("que era velha"))])
     assert ",," not in out and ", ," not in out
     assert out == "A casa, foi vendida ontem."
+
+
+def test_corrige_maiuscula_no_inicio():
+    # remocao que expoe um novo inicio de frase em minuscula -> deve subir
+    txt = "Apesar de tudo, as series de streaming dominaram o ano todo."
+    i = txt.find("Apesar de tudo, ")
+    out = ct._remover_e_costurar(txt, [(i, i + len("Apesar de tudo, "))])
+    assert out[0].isupper()                      # nao comeca minusculo
+    assert out.startswith("As series")
+
+
+def test_aparar_protege_abertura_e_fecho():
+    # texto com 5 frases; lead e desfecho fortes que NAO devem ser cortados.
+    texto = (
+        "A cidade investiu pesado em mobilidade neste ano de muitas mudancas. "
+        "O metro, que vivia lotado, ganhou dez novos trens importados. "
+        "As ciclovias, antes raras, agora cruzam todos os bairros centrais. "
+        "Os onibus, enfim, foram totalmente eletrificados pela prefeitura. "
+        "O resultado surpreendeu ate os mais pessimistas."
+    )
+    limite = ct.contar(texto) - 45               # apara 45 chars
+    faixa = max(ct.TOLERANCIA_RODADA_1, ct.TOLERANCIA_RODADA_2)
+    cand = ct._aparar_para_caber(texto, limite, faixa)
+    assert cand is not None and ct.contar(cand) <= limite
+    assert cand.startswith("A cidade investiu pesado em mobilidade")  # lead intacto
+    assert cand.rstrip().endswith("os mais pessimistas.")             # fecho intacto
+    assert _subseq_sem_espacos(cand, texto)
 
 
 def test_costura_conserta_virgula_antes_de_ponto():
