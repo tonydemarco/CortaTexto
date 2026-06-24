@@ -66,7 +66,7 @@ import urllib.request
 import zlib
 from dataclasses import dataclass, field
 from tkinter import font as tkfont
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox, ttk
 from typing import Callable, List, Optional
 
 
@@ -260,6 +260,38 @@ def _curvar_aspas(s: str) -> str:
         else:
             res.append(ch)
     return "".join(res)
+
+
+# Texto-placeholder do Manual (so para validar a janela; o texto real vira depois).
+_MANUAL_PLACEHOLDER = """CortaTexto — Manual (rascunho de teste)
+
+O QUE E
+O CortaTexto encurta um texto para caber num limite de caracteres que voce
+define, usando uma IA LOCAL (Ollama, modelo qwen3). Principio: quem conta os
+caracteres e o proprio app — o resultado NUNCA passa do limite.
+
+COMO USAR
+1. Cole o texto no campo de cima ("Texto a ser tesourado").
+2. Em "Reduza para", informe o limite em caracteres.
+3. (Opcional) ajuste Tolerancia 1/2 e Max. tentativas.
+4. Clique em Resumir (ou tecle Enter).
+5. Acompanhe as tentativas ao vivo; no fim aparece "X caracteres em N tentativas".
+6. Edite o resultado se quiser e clique em Copiar resultado.
+
+OS CAMPOS
+- Reduza para: o limite; o resultado nunca o ultrapassa.
+- Tolerancia 1/2: o quao abaixo do limite e aceitavel (alvo de qualidade).
+- Max. tentativas: teto de chamadas a IA.
+
+BOM SABER
+- Corte leve: o texto e enxugado mantendo todas as frases.
+- Corte grande: vira um resumo de verdade.
+- Cortes muito drasticos podem terminar em reticencias.
+- Precisa do Ollama rodando e do modelo baixado (ollama pull qwen3).
+
+(Texto de exemplo, apenas para testar esta janela. O manual definitivo sera
+fornecido depois.)
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1974,26 +2006,74 @@ class App(tk.Tk):
 
     # ---- caixa de texto branca com cantos arredondados --------------------
     def _caixa_texto(self, parent: tk.Misc, **text_kw):
-        """Caixa de texto BRANCA com cantos arredondados. Como o Tkinter nao
-        arredonda widgets, desenhamos um cartao branco arredondado num Canvas e
-        embutimos o ScrolledText (branco) por cima, recuado pelo raio -- assim
-        os cantos retos do Text somem no preenchimento branco e so a borda
-        arredondada cinza aparece. Usamos grid (nao place) para que a altura
-        requisitada pelo Text (numero de linhas) propague ao cartao e a janela
-        abra mostrando TODAS as linhas. Retorna (card, texto)."""
-        r = 28  # raio dos cantos das caixas (dobrado de 14)
+        """Caixa de texto BRANCA com cantos arredondados e barra de scroll no
+        visual da interface. Desenhamos um cartao branco arredondado num Canvas
+        e embutimos um `tk.Text` por cima, recuado pelo raio. A barra de scroll
+        e CUSTOM (Canvas): um trilho de LINHA FINA cinza (`COR_BORDA`, 2px) com
+        um CIRCULO (anel) como alca, que reflete e controla a rolagem. Retorna
+        (card, texto)."""
+        r = 28          # raio dos cantos das caixas
+        larg_sb = 22    # largura da faixa da barra de scroll (folga lateral p/ o anel)
+        rc = 8          # raio do circulo (alca)
+        mc = 2          # margem p/ o contorno do circulo nao ser cortado nas pontas
         card = tk.Frame(parent, bg=COR_FUNDO, highlightthickness=0, bd=0)
         card.grid_rowconfigure(0, weight=1)
         card.grid_columnconfigure(0, weight=1)
         cv = tk.Canvas(card, width=1, height=1, bg=COR_FUNDO,
                        highlightthickness=0, bd=0)
         cv.grid(row=0, column=0, sticky="nsew")
-        txt = scrolledtext.ScrolledText(
+        txt = tk.Text(
             card, bg="#ffffff", fg=COR_TEXTO, insertbackground=COR_TEXTO,
             relief="flat", bd=0, highlightthickness=0, padx=10, pady=8,
             font=self._f_base, **text_kw)
-        txt.frame.config(bg="#ffffff")
-        txt.grid(row=0, column=0, sticky="nsew", padx=r, pady=r)
+        # espaco extra a direita (r + larg_sb) reservado para a barra custom
+        txt.grid(row=0, column=0, sticky="nsew", padx=(r, r + larg_sb), pady=r)
+
+        # ---- barra de scroll custom: trilho (linha) + alca (circulo) ----
+        sb = tk.Canvas(card, width=larg_sb, bg="#ffffff",
+                       highlightthickness=0, bd=0)
+        sb._frac = (0.0, 1.0)                       # (first, last) da view
+        sb.place(relx=1.0, x=-r, y=r, anchor="ne", width=larg_sb,
+                 relheight=1.0, height=-2 * r)
+
+        def _desenhar_sb(evento=None):
+            try:
+                h = sb.winfo_height()
+            except tk.TclError:
+                return
+            sb.delete("all")
+            if h < 4:
+                return
+            cx = larg_sb // 2
+            sb.create_line(cx, rc, cx, h - rc, fill=COR_BORDA, width=2)
+            first, last = sb._frac
+            size = last - first
+            if size < 0.999:                        # ha conteudo a rolar
+                topo = rc + mc                      # trajeto recuado das pontas
+                usable = max(1, (h - rc - mc) - topo)
+                denom = 1.0 - size
+                p = (first / denom) if denom > 1e-6 else 0.0
+                cy = topo + min(1.0, max(0.0, p)) * usable
+                sb.create_oval(cx - rc, cy - rc, cx + rc, cy + rc,
+                               outline=COR_BORDA, width=2, fill="#ffffff")
+
+        def _sb_set(first, last):                   # chamado pelo yscrollcommand
+            sb._frac = (float(first), float(last))
+            _desenhar_sb()
+
+        def _sb_arrasta(evento):                    # arrastar/clicar move a view
+            h = sb.winfo_height()
+            topo = rc + mc
+            usable = max(1, (h - rc - mc) - topo)
+            first, last = sb._frac
+            size = last - first
+            p = min(1.0, max(0.0, (evento.y - topo) / usable))
+            txt.yview_moveto(p * (1.0 - size))
+
+        txt.config(yscrollcommand=_sb_set)
+        sb.bind("<Button-1>", _sb_arrasta)
+        sb.bind("<B1-Motion>", _sb_arrasta)
+        sb.bind("<Configure>", _desenhar_sb)
 
         def _redraw(evento=None):
             try:
@@ -2049,7 +2129,7 @@ class App(tk.Tk):
                    "highlightthickness": 1, "highlightbackground": COR_BORDA,
                    "highlightcolor": COR_BORDA_FOCO}
 
-        # ---- topo: LOGO no canto esquerdo ----
+        # ---- topo: LOGO no canto esquerdo, botao MANUAL no canto direito ----
         topo = tk.Frame(self, bg=COR_FUNDO)
         topo.grid(row=0, column=0, columnspan=4, sticky="ew", padx=14, pady=(12, 2))
         if self._logo_img is not None:
@@ -2058,6 +2138,10 @@ class App(tk.Tk):
         else:  # fallback textual se o logo nao carregar
             tk.Label(topo, text="CortaTexto", font=(self._familia, 26),
                      **est_lbl).grid(row=0, column=0, sticky="w")
+        topo.grid_columnconfigure(1, weight=1)        # espacador empurra p/ direita
+        self.btn_manual = self._criar_botao(topo, "Manual", self._abrir_manual,
+                                            primario=True)  # cinza, como o Resumir
+        self.btn_manual.grid(row=0, column=2, sticky="ne", pady=(55, 0))  # 53px abaixo
 
         # ---- cabecalho da entrada: rotulo + contador ----
         cab_ent = tk.Frame(self, bg=COR_FUNDO)
@@ -2093,7 +2177,7 @@ class App(tk.Tk):
         tk.Label(params, text="Reduza para:", **est_lbl).grid(
             row=0, column=0, padx=(0, 6), **celp)
         self.var_limite = tk.StringVar(value="280")
-        self._campo_pilula(params, self.var_limite, 4)[0].grid(
+        self._campo_pilula(params, self.var_limite, 10)[0].grid(
             row=0, column=1, **celp)
         tk.Label(params, text="caracteres", **est_lbl).grid(
             row=0, column=2, padx=(6, 0), **celp)
@@ -2321,7 +2405,7 @@ class App(tk.Tk):
             if tipo == "progresso":
                 tent, chars = payload
                 self.lbl_contagem.config(
-                    text=f"Tentativa {tent} — {chars} caracteres",
+                    text=f"Tentativa {tent} → {chars} caracteres",
                     foreground=COR_NORMAL)
                 continue  # ao vivo: nao encerra ainda
 
@@ -2374,9 +2458,9 @@ class App(tk.Tk):
         w = event.widget
         try:
             ant = w.get("insert -1c", "insert")
+            w.insert("insert", "“" if (ant == "" or ant in _ABRE_ASPA) else "”")
         except tk.TclError:
-            ant = ""
-        w.insert("insert", "“" if (ant == "" or ant in _ABRE_ASPA) else "”")
+            return None  # widget somente-leitura (ex.: janela do Manual)
         return "break"  # impede a insercao do U+0022
 
     def _colar_curvo(self, event, recontar):
@@ -2410,6 +2494,37 @@ class App(tk.Tk):
                 pass
         self._copia_after = self.after(
             1500, lambda: self.lbl_copia.config(text=""))
+
+    def _abrir_manual(self) -> None:
+        """Abre o Manual numa janela pop-up no mesmo visual da interface (fundo
+        branco, fonte Garoa, caixa branca arredondada com a barra de scroll
+        custom). Texto ainda e placeholder."""
+        top = tk.Toplevel(self)
+        top.title("Manual")
+        top.configure(bg=COR_FUNDO)
+        top.transient(self)
+        tk.Label(top, text="Manual do CortaTexto", bg=COR_FUNDO, fg=COR_TEXTO,
+                 font=self._f_base).grid(row=0, column=0, sticky="w",
+                                         padx=16, pady=(14, 6))
+        card, txt = self._caixa_texto(top, height=22, wrap="word")
+        card.grid(row=1, column=0, sticky="nsew", padx=14, pady=4)
+        txt.insert("1.0", _curvar_aspas(_MANUAL_PLACEHOLDER))
+        txt.config(state="disabled")               # somente leitura
+        btn = self._criar_botao(top, "Fechar", top.destroy)
+        btn.grid(row=2, column=0, pady=(6, 14))
+        top.grid_rowconfigure(1, weight=1)
+        top.grid_columnconfigure(0, weight=1)
+        top.minsize(480, 360)
+        top.update_idletasks()
+        w = max(620, top.winfo_reqwidth())
+        sh = self.winfo_screenheight()
+        h = min(top.winfo_reqheight(), sh - 140)
+        x = max(0, (self.winfo_screenwidth() - w) // 2)
+        y = max(24, (sh - h) // 3)
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        top.bind("<Escape>", lambda e: top.destroy())
+        top.lift()
+        top.focus_force()
 
     def _ao_fechar(self) -> None:
         # Sinaliza cancelamento (a thread daemon encerra logo) e fecha.
