@@ -750,3 +750,44 @@ def test_traduzir_excecao_passthrough_e_fallback():
     assert ct.traduzir_excecao(ct.ErroResumo("vazio")) == "vazio"
     assert ct.traduzir_excecao(ct.RespostaVaziaError("sem texto")) == "sem texto"
     assert "Erro inesperado" in ct.traduzir_excecao(RuntimeError("boom"))
+
+
+# --------------------------------------------------------------------------
+# Autoinstalador (Ollama + qwen3): deteccao por API e do binario
+# --------------------------------------------------------------------------
+class _FakeResp:
+    def __init__(self, data=b""):
+        self._d = data if isinstance(data, bytes) else data.encode("utf-8")
+
+    def read(self):
+        return self._d
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_modelo_instalado_le_tags(monkeypatch):
+    tags = '{"models":[{"name":"qwen3:latest"},{"name":"llama3:8b"}]}'
+    monkeypatch.setattr(ct.urllib.request, "urlopen",
+                        lambda url, timeout=0: _FakeResp(tags))
+    assert ct._modelo_instalado("qwen3") is True       # qwen3:latest casa
+    assert ct._modelo_instalado("mistral") is False    # ausente
+
+
+def test_modelo_instalado_e_no_ar_offline(monkeypatch):
+    def boom(url, timeout=0):
+        raise OSError("conexao recusada")
+    monkeypatch.setattr(ct.urllib.request, "urlopen", boom)
+    assert ct._modelo_instalado("qwen3") is False       # erro -> nao instalado
+    assert ct._ollama_no_ar() is False                  # erro -> fora do ar
+
+
+def test_ollama_binario_fallback_para_path(monkeypatch):
+    monkeypatch.setattr(ct, "OLLAMA_APP_DIRS", ())      # nenhuma Ollama.app
+    monkeypatch.setattr(ct.shutil, "which", lambda n: "/usr/local/bin/ollama")
+    assert ct._ollama_binario() == "/usr/local/bin/ollama"
+    monkeypatch.setattr(ct.shutil, "which", lambda n: None)
+    assert ct._ollama_binario() is None

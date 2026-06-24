@@ -57,9 +57,12 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -76,6 +79,11 @@ from typing import Callable, List, Optional
 # O app usa um modelo LOCAL via Ollama (sem chave de API; roda na sua maquina).
 MODELO_OLLAMA = "qwen3"          # modelo do Ollama -- editavel na interface
 OLLAMA_URL = "http://localhost:11434/api/chat"   # endpoint local do Ollama
+OLLAMA_BASE = "http://127.0.0.1:11434"           # raiz da API local (autoinstalador)
+OLLAMA_DOWNLOAD_URL = "https://ollama.com/download/Ollama-darwin.zip"  # app Mac (zip)
+OLLAMA_APP_DIRS = ("~/Applications/Ollama.app", "/Applications/Ollama.app")
+ESPACO_MINIMO_BYTES = 8 * 1024 ** 3              # ~8 GB livres p/ Ollama + qwen3
+TIMEOUT_DOWNLOAD = 900.0         # s para baixar o Ollama (~178 MB)
 MAX_TOKENS_MIN = 2048            # piso de tokens de saida
 MAX_TOKENS_TETO = 16384          # teto de tokens de saida (evita custo absurdo)
 TEMPERATURA = 0.3                # baixa = mais fiel e estavel
@@ -2043,6 +2051,116 @@ s30tMtaePGVKEj491wCifwBqsY/LWSNDiAAAAABJRU5ErkJggg==
 """
 
 
+# ===========================================================================
+# AUTOINSTALADOR (1o uso): baixa o Ollama + o modelo qwen3 SEM o usuario abrir o
+# Terminal. Tudo por caminho absoluto / urllib / subprocess (so stdlib).
+# ===========================================================================
+def _ollama_binario() -> Optional[str]:
+    """Caminho do binario `ollama`: dentro de uma Ollama.app instalada
+    (~/Applications ou /Applications) ou no PATH. None se nao achar."""
+    for d in OLLAMA_APP_DIRS:
+        b = os.path.join(os.path.expanduser(d), "Contents", "Resources", "ollama")
+        if os.path.exists(b):
+            return b
+    return shutil.which("ollama")
+
+
+def _ollama_no_ar(timeout: float = 2.0) -> bool:
+    """True se o servidor do Ollama responde em 127.0.0.1:11434."""
+    try:
+        urllib.request.urlopen(OLLAMA_BASE + "/api/version", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _modelo_instalado(modelo: str = MODELO_OLLAMA, timeout: float = 4.0) -> bool:
+    """True se o `modelo` (ex.: qwen3) ja foi baixado (consulta /api/tags)."""
+    try:
+        r = urllib.request.urlopen(OLLAMA_BASE + "/api/tags", timeout=timeout)
+        nomes = [m.get("name", "") for m in json.loads(r.read()).get("models", [])]
+        return any(n == modelo or n.startswith(modelo + ":") for n in nomes)
+    except Exception:
+        return False
+
+
+def _espaco_livre_ok(minimo: int = ESPACO_MINIMO_BYTES) -> bool:
+    try:
+        return shutil.disk_usage(os.path.expanduser("~")).free >= minimo
+    except Exception:
+        return True                                  # na duvida, nao bloqueia
+
+
+def _instalar_ollama(progresso: Callable[[str, float], None]) -> str:
+    """Baixa o Ollama (zip) e extrai em ~/Applications (sem senha de admin).
+    Devolve o caminho do binario. Se ja instalado, so devolve o caminho."""
+    ja = _ollama_binario()
+    if ja:
+        return ja
+    base = os.path.expanduser("~/Applications")
+    os.makedirs(base, exist_ok=True)
+    zip_tmp = os.path.join("/tmp", "Ollama-darwin.zip")
+    req = urllib.request.Request(OLLAMA_DOWNLOAD_URL,
+                                 headers={"User-Agent": "CortaTexto"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT_DOWNLOAD) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        baixado = 0
+        with open(zip_tmp, "wb") as f:
+            while True:
+                pedaco = resp.read(1 << 16)
+                if not pedaco:
+                    break
+                f.write(pedaco)
+                baixado += len(pedaco)
+                progresso("Baixando o Ollama (a IA local)",
+                          (baixado / total) if total else 0.0)
+    subprocess.run(["ditto", "-x", "-k", zip_tmp, base], check=True)   # preserva o bundle
+    try:
+        os.remove(zip_tmp)
+    except OSError:
+        pass
+    b = _ollama_binario()
+    if not b:
+        raise ErroResumo("Nao consegui instalar o Ollama (extracao falhou).")
+    return b
+
+
+def _iniciar_ollama(binario: Optional[str] = None) -> None:
+    """Inicia o servidor: abre a Ollama.app (sobe a API sozinha) ou, em ultimo
+    caso, roda o binario com `serve` em segundo plano."""
+    for d in OLLAMA_APP_DIRS:
+        app = os.path.expanduser(d)
+        if os.path.exists(app):
+            subprocess.run(["open", app], check=False)
+            return
+    if binario:
+        subprocess.Popen([binario, "serve"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+
+
+def _esperar_ollama(timeout: int = 60) -> bool:
+    for _ in range(max(1, timeout)):
+        if _ollama_no_ar():
+            return True
+        time.sleep(1)
+    return False
+
+
+def _baixar_modelo(binario: str, modelo: str,
+                   progresso: Callable[[str, float], None]) -> None:
+    """Roda `ollama pull <modelo>` e reporta o progresso (le os '%' da saida)."""
+    proc = subprocess.Popen([binario, "pull", modelo], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for linha in proc.stdout:
+        m = re.search(r"(\d{1,3})%", linha)
+        if m:
+            progresso("Baixando o modelo qwen3 (~5,2 GB)",
+                      min(100, int(m.group(1))) / 100.0)
+    proc.wait()
+    if proc.returncode != 0:
+        raise ErroResumo("Nao consegui baixar o modelo qwen3. Verifique a internet.")
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -2463,6 +2581,123 @@ class App(tk.Tk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
         self.grid_rowconfigure(8, weight=1)
+
+        # No 1o uso: garante Ollama rodando + modelo baixado (autoinstalador).
+        self._setup_aberto = False
+        self.after(500, self._verificar_ambiente)
+
+    # ---- autoinstalador (Ollama + qwen3) ---------------------------------
+    def _verificar_ambiente(self) -> None:
+        """Numa thread: se o Ollama esta instalado mas parado, sobe o servidor.
+        Se faltar instalar o Ollama ou baixar o modelo, abre a tela de setup."""
+        fila: queue.Queue = queue.Queue()
+
+        def checar():
+            binario = _ollama_binario()
+            if binario and not _ollama_no_ar():        # instalado, mas parado
+                _iniciar_ollama(binario)
+                _esperar_ollama(15)
+            fila.put(bool(binario) and _ollama_no_ar() and _modelo_instalado())
+
+        threading.Thread(target=checar, daemon=True).start()
+
+        def aguardar():
+            try:
+                pronto = fila.get_nowait()
+            except queue.Empty:
+                self.after(200, aguardar)
+                return
+            if not pronto:
+                self._abrir_setup()
+        self.after(200, aguardar)
+
+    def _abrir_setup(self) -> None:
+        """Tela 'Preparar o CortaTexto': baixa Ollama + qwen3 com progresso, sem
+        Terminal. So aparece quando falta instalar algo."""
+        if self._setup_aberto:
+            return
+        self._setup_aberto = True
+        top = tk.Toplevel(self)
+        top.title("Preparar o CortaTexto")
+        top.configure(bg=COR_FUNDO)
+        top.transient(self)
+        est = {"bg": COR_FUNDO, "fg": COR_TEXTO}
+
+        def fechar():
+            self._setup_aberto = False
+            top.destroy()
+
+        tk.Label(top, text="Falta preparar a IA (uma vez só)", font=self._f_titulo,
+                 **est).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 6))
+        msg = ("O CortaTexto usa uma IA que roda no SEU Mac. Na primeira vez é "
+               "preciso baixar o Ollama (~178 MB) e o modelo qwen3 (~5,2 GB) — uma "
+               "vez só; depois funciona offline. Pode levar alguns minutos.")
+        tk.Label(top, text=msg, wraplength=470, justify="left", font=self._f_caixa,
+                 **est).grid(row=1, column=0, sticky="w", padx=20, pady=(0, 10))
+        self._setup_status = tk.Label(top, text="", wraplength=470, justify="left",
+                                      font=self._f_caixa, fg=COR_TEXTO_DIM, bg=COR_FUNDO)
+        self._setup_status.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 14))
+        linha = tk.Frame(top, bg=COR_FUNDO)
+        linha.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 18))
+        btn = self._criar_botao(linha, "Instalar agora", lambda: iniciar(), primario=True)
+        btn.grid(row=0, column=0, padx=(0, 8))
+        self._criar_botao(linha, "Agora não", fechar).grid(row=0, column=1)
+        top.grid_columnconfigure(0, weight=1)
+
+        fila: queue.Queue = queue.Queue()
+
+        def progresso(texto, frac):
+            fila.put(f"{texto}… {int(frac * 100)}%")
+
+        def trabalho():
+            try:
+                if not _espaco_livre_ok():
+                    raise ErroResumo("Espaco insuficiente: sao necessarios ~8 GB "
+                                     "livres no disco.")
+                binario = _instalar_ollama(progresso)
+                fila.put("Iniciando o Ollama…")
+                _iniciar_ollama(binario)
+                if not _esperar_ollama(60):
+                    raise ErroResumo("O Ollama nao iniciou a tempo. Tente de novo.")
+                if not _modelo_instalado():
+                    fila.put("Baixando o modelo qwen3 (~5,2 GB). Isso demora…")
+                    _baixar_modelo(binario, MODELO_OLLAMA, progresso)
+                fila.put(("ok", None))
+            except Exception as e:                     # noqa: BLE001
+                fila.put(("erro", str(e)))
+
+        def iniciar():
+            self._set_botao(btn, False)
+            self._setup_status.config(text="Comecando…")
+            threading.Thread(target=trabalho, daemon=True).start()
+            self.after(150, bombear)
+
+        def bombear():
+            try:
+                while True:
+                    item = fila.get_nowait()
+                    if isinstance(item, tuple) and item[0] == "ok":
+                        self._setup_status.config(text="Tudo pronto! Ja pode resumir.")
+                        self._setup_aberto = False
+                        top.after(1000, top.destroy)
+                        return
+                    if isinstance(item, tuple) and item[0] == "erro":
+                        self._setup_status.config(text="Nao deu certo: " + item[1])
+                        btn.config(text="Tentar de novo")
+                        self._set_botao(btn, True)
+                        return
+                    self._setup_status.config(text=str(item))
+            except queue.Empty:
+                pass
+            self.after(150, bombear)
+
+        top.update_idletasks()
+        w = max(520, top.winfo_reqwidth())
+        x = max(0, (self.winfo_screenwidth() - w) // 2)
+        top.geometry(f"{w}x{top.winfo_reqheight()}+{x}+{max(40, self.winfo_screenheight() // 4)}")
+        top.protocol("WM_DELETE_WINDOW", fechar)
+        top.lift()
+        top.focus_force()
 
     # ---- helpers de UI ----------------------------------------------------
     def _limite_atual(self) -> Optional[int]:
