@@ -1855,8 +1855,8 @@ class App(tk.Tk):
         requisitado pelos widgets (sem cortar nada) e centraliza, sem exceder
         a tela."""
         self.update_idletasks()
-        w = self.winfo_reqwidth()
-        h = self.winfo_reqheight()
+        w = int(self.winfo_reqwidth() * 1.3)   # 30% mais largo que o necessario
+        h = self.winfo_reqheight()             # altura inalterada (como ja estava)
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w = min(w, sw - 80)
         h = min(h, sh - 120)
@@ -2071,7 +2071,7 @@ class App(tk.Tk):
         self.lbl_entrada_contagem.grid(row=0, column=1, sticky="e")
 
         # ---- entrada de texto (caixa branca arredondada) ----
-        card_ent, self.txt_entrada = self._caixa_texto(self, height=10, wrap="word")
+        card_ent, self.txt_entrada = self._caixa_texto(self, height=20, wrap="word")
         card_ent.grid(row=2, column=0, columnspan=4, sticky="nsew",
                       padx=14, pady=4)
         self.txt_entrada.bind("<KeyRelease>", self._atualizar_contagem_entrada)
@@ -2142,7 +2142,7 @@ class App(tk.Tk):
                  font=self._f_titulo,
                  **est_lbl).grid(row=7, column=0, columnspan=4, sticky="w",
                                  padx=14, pady=(4, 0))
-        card_sai, self.txt_saida = self._caixa_texto(self, height=10, wrap="word")
+        card_sai, self.txt_saida = self._caixa_texto(self, height=20, wrap="word")
         card_sai.grid(row=8, column=0, columnspan=4, sticky="nsew",
                       padx=14, pady=4)
         self.txt_saida.bind("<KeyRelease>", self._recontar_saida)
@@ -2154,10 +2154,11 @@ class App(tk.Tk):
         self.lbl_contagem.grid(row=9, column=0, columnspan=4, sticky="w",
                               padx=14, pady=(0, 12))
 
-        # Expansao
+        # Expansao: as duas caixas de texto dividem a altura disponivel POR
+        # IGUAL (mesmo peso) -- na tela, ambas mostram o mesmo nº de linhas.
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=3)
-        self.grid_rowconfigure(8, weight=2)
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(8, weight=1)
 
     # ---- helpers de UI ----------------------------------------------------
     def _limite_atual(self) -> Optional[int]:
