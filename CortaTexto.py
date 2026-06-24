@@ -114,9 +114,10 @@ class ErroOllamaIndisponivel(ErroResumo):
 # LOGICA (independente da interface, testavel com mock)
 # ===========================================================================
 def contar(texto: str) -> int:
-    """Contagem exata: TODOS os caracteres (len puro). Fonte de verdade do
+    """Contagem exata de caracteres, IGNORANDO quebras de linha (Enter): elas sao
+    formatacao, nao entram no limite (pedido do usuario). Fonte de verdade do
     programa -- a LLM nunca decide o tamanho."""
-    return len(texto)
+    return len(texto) - texto.count("\n") - texto.count("\r")
 
 
 def _milhar(n: int) -> str:
@@ -138,15 +139,16 @@ class Resultado:
 
 _SISTEMA = (
     "Voce e um redator que RESUME com FLUIDEZ. Escreva um texto NOVO, claro e "
-    "CORRIDO, com SUAS proprias palavras e construcoes -- NAO precisa preservar a "
-    "redacao, a gramatica, a ordem nem a estrutura das frases do original: "
-    "reorganize, funda e reescreva as ideias como ficar mais fluido e natural. "
-    "Aproveite QUASE TODO o limite de caracteres, ficando o mais PROXIMO possivel "
-    "dele SEM NUNCA ultrapassa-lo, e mantendo o MAXIMO de informacao (fatos, nomes "
-    "e numeros) que couber -- perca o MINIMO de conteudo. REGRA FIRME: use SOMENTE "
-    "fatos presentes no texto; NUNCA acrescente numeros, idades, datas ou detalhes "
-    "que nao estejam la (na duvida, omita). Mantenha o idioma e um tom natural. "
-    "Responda APENAS com o texto, sem comentarios, aspas ou rotulos."
+    "CORRIDO, com SUAS proprias palavras (NAO precisa preservar a redacao nem a "
+    "gramatica do original). MAS SIGA A ORDEM em que os assuntos aparecem no "
+    "texto: pode reescrever e fundir frases VIZINHAS, porem NAO embaralhe os fatos "
+    "nem traga para o inicio coisas que estavam no fim -- mantenha a mesma "
+    "sequencia de assuntos do original. Aproveite QUASE TODO o limite de "
+    "caracteres, ficando o mais PROXIMO possivel dele SEM NUNCA ultrapassa-lo, e "
+    "mantendo o MAXIMO de informacao (fatos, nomes e numeros) que couber. REGRA "
+    "FIRME: use SOMENTE fatos presentes no texto; NUNCA acrescente numeros, idades, "
+    "datas ou detalhes que nao estejam la (na duvida, omita). Mantenha o idioma e "
+    "um tom natural. Responda APENAS com o texto, sem comentarios, aspas ou rotulos."
 )
 
 
@@ -209,10 +211,11 @@ def _prompt_inicial(texto: str, limite: int, minimo: int) -> str:
         f"(cerca de {palavras} palavras). Escreva um RESUMO novo e CORRIDO, com "
         f"suas proprias palavras, entre {minimo} e {limite} caracteres -- aprox. "
         f"{palavras} palavras --, o mais PROXIMO possivel de {limite} sem JAMAIS "
-        f"ultrapassar. Reorganize, funda e condense as ideias LIVREMENTE (nao "
-        f"precisa seguir a ordem, a gramatica nem a redacao do original); mantenha "
-        f"o MAXIMO de fatos, nomes e numeros que couber e NAO invente nada. "
-        f"Responda apenas com o texto.\n\nTEXTO:\n{texto}"
+        f"ultrapassar. Condense com suas proprias palavras SEGUINDO A ORDEM dos "
+        f"assuntos do original (nao embaralhe nem antecipe o que vem depois; pode "
+        f"reescrever e fundir frases vizinhas). Mantenha o MAXIMO de fatos, nomes e "
+        f"numeros que couber e NAO invente nada. Responda apenas com o texto.\n\n"
+        f"TEXTO:\n{texto}"
     )
 
 
@@ -223,9 +226,9 @@ def _prompt_encurtar(resumo: str, atual: int, limite: int, minimo: int) -> str:
         f"O texto abaixo tem {atual} caracteres e ultrapassou o limite em "
         f"{excesso}. Reescreva-o mais ENXUTO, entre {minimo} e {limite} caracteres "
         f"(cerca de {palavras} palavras), o mais PROXIMO possivel de {limite} sem "
-        f"passar. Pode reformular, reordenar e fundir frases LIVREMENTE; mantenha "
-        f"o maximo de fatos, nomes e numeros e NAO invente. Responda apenas com o "
-        f"novo texto.\n\nTEXTO ATUAL:\n{resumo}"
+        f"passar. Pode reformular e fundir frases vizinhas, MAS mantenha a ORDEM "
+        f"dos assuntos (nao embaralhe); preserve o maximo de fatos, nomes e numeros "
+        f"e NAO invente. Responda apenas com o novo texto.\n\nTEXTO ATUAL:\n{resumo}"
     )
 
 
@@ -237,9 +240,10 @@ def _prompt_expandir(texto: str, resumo: str, atual: int, limite: int,
         f"de {faltam} para chegar perto do limite de {limite}. Reescreva-a MAIS "
         f"COMPLETA, entre {minimo} e {limite} caracteres, o mais PROXIMO possivel "
         f"de {limite} sem ultrapassar, reincorporando fatos, nomes e numeros do "
-        f"TEXTO ORIGINAL abaixo que ficaram de fora -- com suas proprias palavras "
-        f"e do jeito mais fluido, sem inventar nada. Responda apenas com o novo "
-        f"texto.\n\nTEXTO ORIGINAL:\n{texto}\n\nSUA VERSAO ATUAL:\n{resumo}"
+        f"TEXTO ORIGINAL abaixo que ficaram de fora -- com suas proprias palavras, "
+        f"NA MESMA ORDEM dos assuntos do original, sem inventar nada. Responda "
+        f"apenas com o novo texto.\n\nTEXTO ORIGINAL:\n{texto}\n\nSUA VERSAO "
+        f"ATUAL:\n{resumo}"
     )
 
 
@@ -513,6 +517,28 @@ def _dividir_frases(texto: str) -> List[str]:
     return frases
 
 
+def _fatiar(texto: str) -> tuple:
+    """Como _dividir_frases, mas tambem devolve `quebras`: para cada frase,
+    quantas QUEBRAS DE LINHA vinham logo depois dela no original. Serve para
+    reconstruir os PARAGRAFOS na montagem (preservar o '\\n' do autor)."""
+    frases, spans = [], []
+    pos = 0
+    cortes = [m.end() for m in re.finditer(r"[.!?…]+(?=\s|$)", texto)] + [len(texto)]
+    for c in cortes:
+        bruto = texto[pos:c]
+        s = bruto.strip()
+        if s:
+            ini = pos + (len(bruto) - len(bruto.lstrip()))
+            frases.append(s)
+            spans.append((ini, ini + len(s)))
+        pos = c
+    quebras = []
+    for i, (_, fim) in enumerate(spans):
+        prox = spans[i + 1][0] if i + 1 < len(spans) else len(texto)
+        quebras.append(texto[fim:prox].count("\n"))
+    return frases, quebras
+
+
 def _tokens_chave(frase: str) -> tuple:
     """(palavras com inicial MAIUSCULA que NAO sao funcionais, numeros) da frase
     -- o que NAO pode sumir ao encurta-la. Inclui nomes proprios mesmo no inicio
@@ -603,8 +629,8 @@ def _encurtar_frases(frases: List[str], chamar_llm: Callable[[str, str], str],
     return saida
 
 
-def _montar_frases(originais: List[str], curtas: List[str],
-                   limite: int) -> Optional[str]:
+def _montar_frases(originais: List[str], curtas: List[str], limite: int,
+                   quebras: Optional[List[int]] = None) -> Optional[str]:
     """Monta as frases NA ORDEM, FIEL (nunca mistura/reordena), o mais perto
     possivel do limite COM O MINIMO DE EDICAO. Preferencia, nesta ordem:
       (1) tudo ORIGINAL, se ja couber -> nao mexe em nada;
@@ -614,12 +640,30 @@ def _montar_frases(originais: List[str], curtas: List[str],
           abaixo do limite num corte leve;
       (3) so se nem encurtando tudo couber, ELIMINA frases INTEIRAS do miolo
           (preservando 1a e ultima), usando as versoes encurtadas.
-    Devolve None se nem a 1a+ultima (encurtadas) cabem (o gerativo assume)."""
+    `quebras` (de `_fatiar`): nº de quebras de linha apos cada frase no original;
+    sao REINSERIDAS entre as frases mantidas (preserva paragrafos, mesmo dropando
+    o miolo). Devolve None se nem a 1a+ultima (encurtadas) cabem."""
     if not originais:
         return None
     n = len(originais)
 
-    full = " ".join(originais)
+    def sep(a: int, b: int) -> str:               # separador entre mantidas a e b
+        q = max(quebras[a:b]) if (quebras and b > a) else 0
+        return "\n\n" if q >= 2 else ("\n" if q == 1 else " ")
+
+    def juntar(idxs, escolha):
+        idxs = sorted(idxs)
+        if not idxs:
+            return ""
+        ped = [escolha(idxs[0])]
+        for k in range(1, len(idxs)):
+            ped.append(sep(idxs[k - 1], idxs[k]))
+            ped.append(escolha(idxs[k]))
+        return "".join(ped)
+
+    todas = list(range(n))
+    orig = lambda i: originais[i]
+    full = juntar(todas, orig)
     if contar(full) <= limite:
         return full                               # (1) cabe sem encurtar nada
 
@@ -632,32 +676,25 @@ def _montar_frases(originais: List[str], curtas: List[str],
         mapa = _mapa_subconjuntos(comps)
         viaveis = sorted(s for s in mapa if s >= excesso)
         if viaveis:                               # da pra caber so encurtando
-            # menor soma de economia >= excesso => resultado mais perto do topo,
-            # editando o minimo de frases possivel.
             encurtar = {idx_red[k] for k in mapa[viaveis[0]]}
-            return " ".join(curtas[i] if i in encurtar else originais[i]
-                            for i in range(n))
+            return juntar(todas, lambda i: curtas[i] if i in encurtar else originais[i])
 
     # (3) nem encurtando tudo cabe -> elimina frases INTEIRAS (usa as encurtadas)
-    todas = list(range(n))
-
-    def juntar(idxs):
-        return " ".join(curtas[i] for i in sorted(idxs))
-
-    cand = juntar(todas)
+    curta = lambda i: curtas[i]
+    cand = juntar(todas, curta)
     if contar(cand) <= limite:
         return cand                               # tudo encurtado cabe
     protegidas = {0, n - 1}
-    if contar(juntar(sorted(protegidas))) > limite:
+    if contar(juntar(sorted(protegidas), curta)) > limite:
         return None                               # nem abertura+fecho cabem
     miolo = [i for i in todas if i not in protegidas]
-    comps = [contar(curtas[i]) + 1 for i in miolo]   # +1 pelo espaco de juncao
+    comps = [contar(curtas[i]) + 1 for i in miolo]   # +1 pela juncao
     excesso2 = contar(cand) - limite
     alcancavel = _mapa_subconjuntos(comps)
     melhor = None
     for s in sorted(x for x in alcancavel if x >= excesso2)[:10]:
         dropar = {miolo[i] for i in alcancavel[s]}
-        c = juntar([i for i in todas if i not in dropar])
+        c = juntar([i for i in todas if i not in dropar], curta)
         L = contar(c)
         if 0 < L <= limite and (melhor is None or L > contar(melhor)):
             melhor = c                            # o que mantem MAIS conteudo
@@ -726,7 +763,8 @@ def resumir(
         return Resultado(texto, n, limite, 0, True, False, False, [n])
 
     historico: List[int] = []
-    melhor: Optional[str] = None  # melhor candidato que cabe no limite
+    melhor: Optional[str] = None  # melhor candidato que CABE (mais perto por baixo)
+    melhor_acima: Optional[str] = None  # menor candidato ACIMA do limite (p/ aparar)
 
     def anota(caracteres: int) -> None:
         """Registra uma tentativa no historico e a reporta ao vivo (se houver
@@ -736,10 +774,15 @@ def resumir(
             relatar(len(historico), caracteres)
 
     def registra_melhor(cand: str) -> None:
-        nonlocal melhor
-        if cand and contar(cand) <= limite:
-            if melhor is None or contar(cand) > contar(melhor):
+        nonlocal melhor, melhor_acima
+        if not cand:
+            return
+        c = contar(cand)
+        if c <= limite:                              # cabe: guarda o mais longo
+            if melhor is None or c > contar(melhor):
                 melhor = cand
+        elif melhor_acima is None or c < contar(melhor_acima):
+            melhor_acima = cand                      # acima: guarda o MENOR (mais perto)
 
     def validar(cand: object) -> str:
         """A LLM precisa devolver texto nao vazio. '' ou None sao erro de
@@ -754,6 +797,15 @@ def resumir(
         # Escolhe, entre os candidatos que CABEM, o mais proximo do limite
         # (melhor qualidade). Se nada coube e nao foi cancelado, corte limpo.
         candidatos = [c for c in (atual, melhor) if c and contar(c) <= limite]
+        # O loop gerativo as vezes DERRAPA bem abaixo do limite (encurta demais) e
+        # nao recupera (expandir nao cresce). Entao APROVEITA o melhor candidato
+        # que ficou ACIMA do limite, aparado de forma LIMPA (clausula/fronteira de
+        # frase, sem '...'): costuma encostar no limite, bem melhor que o de baixo.
+        if not cancelado_flag and melhor_acima is not None:
+            aparado, mec = _encolher_limpo(
+                melhor_acima, limite, max(tolerancia_1, tolerancia_2))
+            if not mec and aparado and contar(aparado) <= limite:
+                candidatos.append(aparado)
         cortado = False
         if candidatos:
             final = max(candidatos, key=contar)
@@ -794,10 +846,10 @@ def resumir(
     atual: Optional[str] = None
     remover = contar(texto) - limite          # > 0 aqui (ja passou o atalho)
     if remover > 0 and remover / contar(texto) <= LIMIAR_FRASE_A_FRASE:
-        frases = _dividir_frases(texto)
+        frases, quebras = _fatiar(texto)          # `quebras`: preserva paragrafos
         if len(frases) >= 2:
             curtas = _encurtar_frases(frases, chamar_llm, limite)  # 1 chamada (ou fallback)
-            montado = _montar_frases(frases, curtas, limite)
+            montado = _montar_frases(frases, curtas, limite, quebras)
             if montado is not None and 0 < contar(montado) <= limite:
                 montado = _corrigir_maiusculas(montado)     # inicial de frase
                 anota(contar(montado))

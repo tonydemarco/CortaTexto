@@ -23,7 +23,7 @@ def test_contar_acentos_e_espacos():
     assert ct.contar("café") == 4            # "cafe" com agudo = 4
     assert ct.contar("ação e reacão!") == len("ação e reacão!")
     assert ct.contar("ola mundo, tudo bem?") == 20  # espacos e pontuacao contam
-    assert ct.contar("ola\nmundo") == 9            # a quebra de linha conta
+    assert ct.contar("ola\nmundo") == 8            # a quebra de linha NAO conta
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +108,22 @@ def test_corte_de_seguranca():
     assert r.cortado is True
     assert "..." not in r.texto and "…" not in r.texto   # nunca reticencias
     assert not r.sucesso  # nao convergiu pela LLM
+
+
+def test_finalizar_aproveita_candidato_acima_aparado():
+    # gerativo: 1a resposta ACIMA do limite, depois DESPENCA bem abaixo. finalizar
+    # nao deve parar no de baixo: apara a de cima (fronteira de frase) p/ ficar
+    # mais perto do limite.
+    saidas = iter([
+        "Frase um bem grande aqui. Frase dois tambem grande aqui.",   # 56 (> 50)
+        "Curto.",                                                     # 6  (<< 50)
+    ])
+    r = ct.resumir("x" * 1000, 50, max_tentativas=2,
+                   chamar_llm=lambda s, u: next(saidas))
+    assert r.caracteres <= 50
+    assert r.caracteres > ct.contar("Curto.")          # nao parou no de baixo
+    assert "..." not in r.texto
+    assert r.texto == "Frase um bem grande aqui."       # aparou a de cima na frase
 
 
 def test_nunca_passa_do_limite_em_varios_limites():
@@ -441,6 +457,28 @@ def test_aparar_apara_excesso_e_e_fiel():
 def test_dividir_frases():
     f = ct._dividir_frases("Primeira frase. Segunda frase! Terceira? Sem fim")
     assert f == ["Primeira frase.", "Segunda frase!", "Terceira?", "Sem fim"]
+
+
+def test_contar_ignora_quebras_de_linha():
+    assert ct.contar("abc") == 3
+    assert ct.contar("ab\ncd") == 4            # o \n nao conta
+    assert ct.contar("a\n\nb\r\nc") == 3       # nenhuma quebra conta
+
+
+def test_fatiar_registra_quebras():
+    frases, quebras = ct._fatiar("Uma. Duas.\n\nTres. Quatro.")
+    assert frases == ["Uma.", "Duas.", "Tres.", "Quatro."]
+    assert quebras == [0, 2, 0, 0]             # paragrafo (\n\n) apos "Duas."
+
+
+def test_montar_frases_preserva_paragrafos():
+    originais = ["Abertura aqui.", "Fim do paragrafo um.", "Comeco do dois.",
+                 "Fecho final."]
+    quebras = [0, 2, 0, 0]                      # quebra dupla apos a 2a frase
+    out = ct._montar_frases(originais, originais, 999, quebras)  # cabe inteiro
+    assert "\n\n" in out
+    assert out.split("\n\n")[0] == "Abertura aqui. Fim do paragrafo um."
+    assert out.split("\n\n")[1] == "Comeco do dois. Fecho final."
 
 
 def test_frase_fiel_preserva_maiusculas_e_numeros():
