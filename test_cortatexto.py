@@ -97,7 +97,7 @@ def test_expansao_converge():
 
 
 # --------------------------------------------------------------------------
-# Corte de seguranca (ultimo recurso): nunca passa do limite, termina em "..."
+# Corte de seguranca (ultimo recurso): nunca passa do limite, SEM reticencias
 # --------------------------------------------------------------------------
 def test_corte_de_seguranca():
     def fake(sistema, usuario):
@@ -106,7 +106,7 @@ def test_corte_de_seguranca():
     r = ct.resumir("x" * 1000, 50, max_tentativas=3, chamar_llm=fake)
     assert r.caracteres <= 50          # invariante: nunca passa do limite
     assert r.cortado is True
-    assert r.texto.endswith("...")
+    assert "..." not in r.texto and "…" not in r.texto   # nunca reticencias
     assert not r.sucesso  # nao convergiu pela LLM
 
 
@@ -207,11 +207,10 @@ def test_cortar_preserva_palavras_e_limite():
     txt = "O rato roeu a roupa do rei de Roma ontem a noite toda"
     out = ct._cortar(txt, 20)
     assert len(out) <= 20
-    assert out.endswith("...")
-    # o trecho antes do "..." e um prefixo do original (nao corta no meio de
-    # palavra: o corte foi feito num espaco e depois aparado)
-    assert txt.startswith(out[:-3])
-    assert not out[:-3].endswith(" ")
+    assert "..." not in out and "…" not in out          # sem reticencias
+    # o resultado e um prefixo do original terminando em palavra inteira
+    assert txt.startswith(out)
+    assert not out.endswith(" ")
 
 
 def test_cortar_nao_altera_texto_que_ja_cabe():
@@ -250,12 +249,13 @@ def test_original_abaixo_da_faixa_nao_chama_llm():
 # Tolerancia progressiva: aceitacao so na RODADA 2 (mecanismo central da spec)
 # --------------------------------------------------------------------------
 def test_aceita_na_rodada_2():
-    # 265 esta fora da faixa da rodada 1 [270,280], mas dentro da rodada 2
-    # [260,280]. Logo a rodada 1 se esgota e a rodada 2 aceita.
+    # Com tol1=6 (padrao) a faixa da rodada 1 e [274,280]; 265 fica fora dela,
+    # mas dentro da rodada 2 [260,280] (tol2=20). Logo a rodada 1 se esgota e a
+    # rodada 2 aceita. Fixamos max_tentativas=10 para nao depender do default.
     def fake(sistema, usuario):
         return "a" * 265
 
-    r = ct.resumir("x" * 1000, 280, chamar_llm=fake)  # tol1=10, tol2=20, mt=10
+    r = ct.resumir("x" * 1000, 280, max_tentativas=10, chamar_llm=fake)
     assert r.sucesso
     assert r.caracteres == 265
     # 1 chamada inicial + 4 da rodada 1 (tent_r1 = max(1, 9//2) = 4); a rodada 2
@@ -355,19 +355,20 @@ def test_expansao_usa_prompt_de_expansao():
 
     r = ct.resumir("x" * 1000, 280, chamar_llm=fake)
     assert 270 <= r.caracteres <= 280
-    assert any("Reincorpore" in p for p in prompts)  # marca do prompt de expandir
+    assert any("reincorporando" in p for p in prompts)  # marca do prompt de expandir
 
 
 # --------------------------------------------------------------------------
-# _cortar com limite pequeno (< 4): apenas fatia, sem reticencias
+# _cortar NUNCA usa reticencias (corta em palavra inteira) e sempre cabe
 # --------------------------------------------------------------------------
-def test_cortar_limite_pequeno_sem_reticencias():
-    for lim in (1, 2, 3):
-        out = ct._cortar("palavra longa demais", lim)
+def test_cortar_nunca_usa_reticencias():
+    for lim in (1, 2, 3, 6, 10, 15, 19):
+        out = ct._cortar("palavra longa demais aqui ok", lim)
         assert len(out) <= lim
-        assert not out.endswith("...")
-    out = ct._cortar("palavra longa demais", 6)
-    assert len(out) <= 6 and out.endswith("...")
+        assert "..." not in out and "…" not in out
+    # corte normal: termina em palavra inteira, sem pontuacao/espaco solto
+    out = ct._cortar("palavra longa demais aqui ok", 15)
+    assert out and not out.endswith((" ", ",", ";", ":", "-"))
 
 
 # --------------------------------------------------------------------------
@@ -411,14 +412,6 @@ _TEXTO_DEL = (
     "naquele dia."
 )
 
-# Saida realista de uma micro-edição (varias frases) usada nos testes de aparo.
-_MICRO_OUT = (
-    "A praca, recem-inaugurada, virou ponto de encontro. Tem bancos, arvores "
-    "e uma fonte. As criancas, animadas, brincam ali toda tarde. Os idosos, "
-    "por sua vez, jogam domino sob as arvores antigas. O lugar agrada a todos."
-)
-
-
 def _subseq_sem_espacos(sub, full):
     """True se cada caractere nao-branco de `sub` aparece, NA ORDEM, em `full`.
     Como o aparo so apaga, normaliza espacos e ajusta maiusculas de inicio de
@@ -445,95 +438,171 @@ def test_aparar_apara_excesso_e_e_fiel():
     assert _subseq_sem_espacos(cand, _TEXTO_DEL)
 
 
-def test_corte_pequeno_usa_micro_edicao_e_apara():
-    # corte pequeno -> 1 chamada de micro-edição (_SISTEMA_MICRO); se a saida do
-    # LLM passa do limite, o Python apara ate caber, fiel a essa saida.
-    orig_in = "z" * (ct.contar(_MICRO_OUT) + 30)    # entrada -> corte pequeno
-    limite = ct.contar(_MICRO_OUT) - 15             # micro-saida fica ACIMA
+def test_dividir_frases():
+    f = ct._dividir_frases("Primeira frase. Segunda frase! Terceira? Sem fim")
+    assert f == ["Primeira frase.", "Segunda frase!", "Terceira?", "Sem fim"]
+
+
+def test_frase_fiel_preserva_maiusculas_e_numeros():
+    o = "Em Monaco, Antonelli venceu as 5 corridas seguidas."
+    assert ct._frase_fiel(o, "Em Monaco, Antonelli venceu 5 corridas.")   # mantem
+    assert not ct._frase_fiel(o, "Ele venceu as 5 corridas seguidas.")     # perdeu nomes
+    assert not ct._frase_fiel(o, "Em Monaco, Antonelli venceu as corridas.")  # perdeu 5
+
+
+def test_nomes_proprios_ignora_inicio_de_frase():
+    txt = "Bom aluno, terminou. Kimi venceu em Monaco. Quando chove, Kimi corre."
+    nomes = ct._nomes_proprios(txt)
+    assert "Kimi" in nomes and "Monaco" in nomes        # nomes reais (meio de frase)
+    assert "Bom" not in nomes and "Quando" not in nomes  # so iniciais de frase
+
+
+def test_frase_fiel_global_libera_inicio_mas_exige_nomes():
+    o = "Bom aluno, Kimi venceu em Monaco."
+    nomes = {"Kimi", "Monaco"}
+    # com trava GLOBAL: enxugar o inicio ('Bom aluno') e permitido (Bom nao e nome)
+    assert ct._frase_fiel(o, "Kimi venceu em Monaco.", nomes)
+    # mas perder um NOME reprova
+    assert not ct._frase_fiel(o, "Kimi venceu.", nomes)
+    # sem trava global, 'Bom' conta como chave -> a mesma reescrita reprova
+    assert not ct._frase_fiel(o, "Kimi venceu em Monaco.")
+
+
+def test_encurtar_frases_mantem_ou_volta_ao_original():
+    frases = ["Kimi venceu em Monaco.", "Ele tinha 19 anos."]
+    # o LLM encurta a 1a (mantendo nomes) e PERDE o numero na 2a
+    resp = "1: Kimi venceu em Monaco.\n2: Ele tinha poucos anos."
+    out = ct._encurtar_frases(frases, lambda s, u: resp, 30)
+    assert out[0] == "Kimi venceu em Monaco."     # encurtada fiel aceita
+    assert out[1] == "Ele tinha 19 anos."          # perdeu 19 -> volta ao original
+
+
+def test_remove_numeros_inventados():
+    orig = "Antonelli mora com os pais. Lidera com 68 pontos desde 2024."
+    # resumo gerativo inventou 'de 18 anos'; 68 e 2024 sao reais -> ficam
+    s = ct._remover_numeros_inventados(
+        "Antonelli, de 18 anos, lidera com 68 pontos desde 2024.", orig)
+    assert "18" not in s and "anos" not in s        # trecho inventado removido
+    assert "68" in s and "2024" in s                 # numeros reais preservados
+    assert s.startswith("Antonelli")
+
+
+def test_remove_numeros_inventados_no_op_quando_tudo_real():
+    orig = "Tem 68 pontos e 5 vitorias."
+    s = "Lidera com 68 pontos e 5 vitorias."
+    assert ct._remover_numeros_inventados(s, orig) == s   # nada a remover
+
+
+def test_encurtar_frases_remove_meta_ecoada():
+    # o modelo as vezes ecoa a meta "(~N caracteres)" no inicio -> deve sumir
+    frases = ["Kimi venceu em Monaco em 2024."]
+    resp = "1: (~18 caracteres) Kimi venceu em Monaco em 2024."
+    out = ct._encurtar_frases(frases, lambda s, u: resp, 30)
+    assert out[0] == "Kimi venceu em Monaco em 2024."
+    assert "caracteres" not in out[0] and "~" not in out[0]
+
+
+def test_alvos_encurtamento_proporcional_ao_limite():
+    frases = ["a" * 100, "b" * 100, "c" * 100]     # total 300 (+2 juncoes)
+    # cabe folgado -> nao pede corte (alvo = tamanho atual)
+    assert ct._alvos_encurtamento(frases, 1000) == [100, 100, 100]
+    # limite aperta: alvos proporcionais e somam ~ (limite - juncoes)
+    alvos = ct._alvos_encurtamento(frases, 153)    # disp = 151; ratio ~0.503
+    assert all(a < 100 for a in alvos)
+    assert sum(alvos) <= 153 and sum(alvos) >= 140
+    # piso: frases minusculas nunca pedem menos que MIN_FRASE_ALVO
+    curtas = ["Foi.", "Veio.", "Viu."]
+    assert all(a >= ct.MIN_FRASE_ALVO for a in ct._alvos_encurtamento(curtas, 10))
+
+
+def test_prompt_encurtar_frases_inclui_metas():
+    p = ct._prompt_encurtar_frases(["Uma frase aqui."], [9])
+    assert "~9 caracteres" in p and "Uma frase aqui." in p
+
+
+def test_montar_frases_elimina_inteiras_protegendo_pontas():
+    frases = ["Abertura importante aqui.", "Miolo um descartavel.",
+              "Miolo dois descartavel.", "Fecho importante final."]
+    total = ct.contar(" ".join(frases))
+    limite = total - 18                            # forca dropar 1 frase do miolo
+    # sem encurtamento (curtas == originais) -> so resta ELIMINAR frase inteira
+    out = ct._montar_frases(frases, frases, limite)
+    assert out is not None and ct.contar(out) <= limite
+    assert out.startswith("Abertura importante")   # 1a preservada
+    assert out.endswith("Fecho importante final.")  # ultima preservada
+    for f in ct._dividir_frases(out):               # nada foi fundido
+        assert f in frases
+
+
+def test_montar_frases_cabe_inteiro_nao_mexe():
+    frases = ["Uma frase.", "Outra frase.", "Mais uma."]
+    full = " ".join(frases)
+    # limite folgado -> devolve o ORIGINAL intacto (nao encurta nem dropa)
+    assert ct._montar_frases(frases, ["X.", "Y.", "Z."], ct.contar(full)) == full
+
+
+def test_montar_frases_encurta_minimo_sem_dropar():
+    # corte LEVE: precisa tirar poucos chars -> encurta SO o necessario e mantem
+    # TODAS as frases, sem despencar bem abaixo do limite (o bug do 1770).
+    originais = ["Frase um bem grande aqui ok.",
+                 "Frase dois media tambem aqui.",
+                 "Frase tres final."]
+    curtas = ["Frase um grande.",                   # economia 12
+              "Frase dois media tambem aqui.",      # == original (economia 0)
+              "Frase tres final."]                  # == original
+    total = ct.contar(" ".join(originais))
+    out = ct._montar_frases(originais, curtas, total - 5)   # cortar ~5 chars
+    assert out is not None and ct.contar(out) <= total - 5
+    assert len(ct._dividir_frases(out)) == 3         # NAO dropou nenhuma frase
+    assert "Frase dois media tambem aqui." in out    # 2a ficou ORIGINAL
+    assert "Frase tres final." in out                # 3a ficou ORIGINAL
+    assert out.startswith("Frase um grande.")        # so a 1a foi encurtada
+
+
+def test_corte_pequeno_frase_a_frase_preserva_nomes():
+    orig = ("A Formula 1 cresceu muito. Kimi Antonelli surpreendeu em Monaco. "
+            "Ele venceu 5 corridas. O moleque e o terror.")
+    limite = ct.contar(orig) - 8                    # corte pequeno, cabe encurtando
     chamadas = []
 
     def fake(sistema, usuario):
         chamadas.append(sistema)
-        return _MICRO_OUT
+        return ("1: Formula 1 cresceu muito.\n"
+                "2: Kimi Antonelli surpreendeu em Monaco.\n"
+                "3: Venceu 5 corridas.\n"
+                "4: O moleque e o terror.")
 
-    r = ct.resumir(orig_in, limite, chamar_llm=fake)
-    assert len(chamadas) == 1                         # uma unica chamada
-    assert chamadas[0] == ct._SISTEMA_MICRO           # caminho de micro-edição
-    assert r.caracteres <= limite                     # Python aparou para caber
-    assert _subseq_sem_espacos(r.texto, _MICRO_OUT)   # so apara a saida do LLM
+    r = ct.resumir(orig, limite, chamar_llm=fake)
+    assert r.caracteres <= limite
+    assert chamadas and chamadas[0] == ct._SISTEMA_FRASES   # caminho frase-a-frase
+    # nenhuma frase do resultado e fusao: cada uma e fiel a UMA frase original
+    for f in ct._dividir_frases(r.texto):
+        assert sum(1 for o in ct._dividir_frases(orig) if ct._frase_fiel(o, f)) >= 1
 
 
-def test_corte_pequeno_micro_ja_cabe():
-    # micro-edição ja devolve <= limite -> usada como esta (sem aparo), sucesso.
-    orig_in = "z" * (ct.contar(_MICRO_OUT) + 40)
-    limite = ct.contar(_MICRO_OUT) + 5
-    r = ct.resumir(orig_in, limite, chamar_llm=lambda s, u: _MICRO_OUT)
-    assert r.texto == _MICRO_OUT
-    assert r.sucesso and not r.cortado
+def test_corte_pequeno_nao_mistura_e_dropa_inteiras():
+    # LLM nao retorna o formato 'N: frase' -> cada frase volta ao ORIGINAL; o
+    # Python so DROPA frases inteiras (preservando 1a e ultima), sem misturar.
+    orig = ("Frase A de abertura bem importante aqui. Frase B do miolo "
+            "descartavel sem problema. Frase C do miolo tambem sai numa boa. "
+            "Frase D de fecho final importante.")
+    limite = ct.contar(orig) - 20                   # ~13% -> corte pequeno
+    r = ct.resumir(orig, limite, chamar_llm=lambda s, u: "bla bla sem numeracao")
+    assert r.caracteres <= limite
+    orig_frases = ct._dividir_frases(orig)
+    for f in ct._dividir_frases(r.texto):           # cada frase = frase original inteira
+        assert f in orig_frases
+    assert r.texto.startswith("Frase A") and r.texto.rstrip().endswith("importante.")
 
 
 def test_corte_pequeno_propaga_ollama_indisponivel():
-    # Ollama fora do ar na micro-edição -> propaga (nao mascara silenciosamente).
+    # Ollama fora do ar -> propaga (nao mascara). Texto com >=2 frases (corte pequeno).
     def fake(sistema, usuario):
         raise ct.ErroOllamaIndisponivel("Ollama nao esta rodando.")
 
     with pytest.raises(ct.ErroOllamaIndisponivel):
-        ct.resumir("z" * 400, 380, chamar_llm=fake)
-
-
-# --------------------------------------------------------------------------
-# Salvaguarda de fidelidade: nomes proprios e numeros do original preservados
-# --------------------------------------------------------------------------
-def test_fidelidade_detecta_nome_e_numero():
-    base = "O evento em Paris reuniu 19 artistas no centro."
-    assert ct._fidelidade_ok(base, base)                       # identico: ok
-    assert ct._fidelidade_ok(base, "Evento em Paris com 19 artistas.")  # tem ambos
-    assert not ct._fidelidade_ok(base, "Evento em Monaco com 19 artistas.")  # nome mudou
-    assert not ct._fidelidade_ok(base, "Evento em Paris com artistas.")      # perdeu 19
-
-
-def test_nomes_proprios_ignora_inicio_de_frase():
-    # 'Hoje' abre frase (maiusculo so por posicao) -> nao e nome; 'Paris' e.
-    nomes = ct._nomes_proprios("Hoje fui a Paris. Depois voltei.")
-    assert "Paris" in nomes
-    assert "Hoje" not in nomes and "Depois" not in nomes
-
-
-def test_corte_pequeno_refaz_se_perde_nome():
-    # 1a micro-edição perde 'Paris' -> salvaguarda refaz; 2a e fiel -> adotada.
-    orig = ("O grande evento em Paris durou tres dias inteiros e foi um enorme "
-            "sucesso de publico e de critica especializada naquela bela cidade.")
-    limite = ct.contar(orig) - 15                      # corte pequeno
-    saidas = iter([
-        "O evento durou tres dias e foi sucesso de publico e critica na cidade.",
-        "O evento em Paris durou tres dias e foi sucesso de publico e critica.",
-    ])
-    calls = []
-
-    def fake(sistema, usuario):
-        calls.append(sistema)
-        return next(saidas)
-
-    r = ct.resumir(orig, limite, chamar_llm=fake)
-    assert "Paris" in r.texto                           # adotou a versao fiel
-    assert len(calls) == 2                              # refez por perda de fidelidade
-    assert r.caracteres <= limite
-
-
-def test_corte_pequeno_fallback_quando_nunca_fiel():
-    # micro-edição sempre perde o nome -> usa a 1a como fallback (cabe, editavel).
-    orig = ("O grande evento em Paris durou tres dias inteiros e foi um enorme "
-            "sucesso de publico e de critica especializada naquela bela cidade.")
-    limite = ct.contar(orig) - 15
-    calls = []
-
-    def fake(sistema, usuario):
-        calls.append(sistema)
-        return "O evento durou tres dias e foi um sucesso total de publico."
-
-    r = ct.resumir(orig, limite, max_tentativas=3, chamar_llm=fake)
-    assert r.caracteres <= limite                       # invariante mantida
-    assert len(calls) == 3                              # tentou o maximo (3) e desistiu
+        ct.resumir("Uma frase qualquer aqui. Outra frase ali. Mais uma frase.",
+                   55, chamar_llm=fake)
 
 
 def test_ollama_indisponivel_e_subclasse_de_erroresumo():
@@ -544,7 +613,7 @@ def test_ollama_indisponivel_e_subclasse_de_erroresumo():
 
 
 def test_corte_grande_ainda_usa_gerativo():
-    # r alto (resumo de verdade): NAO entra na micro-edição; usa _prompt_inicial.
+    # r alto (resumo de verdade): NAO entra no frase-a-frase; usa _prompt_inicial.
     sistemas = []
 
     def fake(sistema, usuario):
@@ -553,7 +622,7 @@ def test_corte_grande_ainda_usa_gerativo():
 
     r = ct.resumir("x" * 1000, 280, chamar_llm=fake)
     assert r.caracteres <= 280
-    assert ct._SISTEMA_MICRO not in sistemas        # nao tomou o atalho de micro-edição
+    assert ct._SISTEMA_FRASES not in sistemas       # nao tomou o atalho frase-a-frase
 
 
 def test_remover_e_costurar_invariante_e_costura():
@@ -586,12 +655,12 @@ def test_encolher_apara_clausula_sem_reticencias():
     assert _subseq_sem_espacos(out, txt)
 
 
-def test_encolher_corta_com_reticencias_sem_estrutura():
-    # sem virgula/frase para aparar -> corte mecanico por palavra com "..."
+def test_encolher_corta_por_palavra_sem_estrutura():
+    # sem virgula/frase para aparar -> corte mecanico por palavra, SEM "..."
     txt = "lorem ipsum dolor sit amet consectetur adipiscing elit sed"
     out, mecanico = ct._encolher_limpo(txt, 20, 20)
     assert ct.contar(out) <= 20
-    assert out.endswith("...")
+    assert "..." not in out and "…" not in out
     assert mecanico is True
 
 
