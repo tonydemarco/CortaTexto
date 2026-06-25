@@ -1,0 +1,27 @@
+O CortaTexto encurta textos usando uma IA que roda no seu Mac.
+Nada do que você escreve sai do computador.
+
+Como instalar:
+
+REQUISITOS
+- Mac com chip Apple (M1, M2, M3 ou M4).  (confira em: menu Apple > Sobre Este Mac)
+- Cerca de 8 GB livres no disco.
+- Internet na primeira vez (para baixar a IA).
+
+PASSO A PASSO
+1. Descompacte este arquivo (duplo-clique no .zip) e arraste o "CortaTexto" para a pasta Aplicativos.
+
+2. Abra o CortaTexto (duplo-clique). Na primeira vez, o Mac pode dizer que o app não pode ser aberto. Faça uma destas opções:
+   - Ajustes do Sistema > Privacidade e Segurança > botão "Abrir Assim Mesmo".
+   - Se o Mac disser que o app "está danificado": abra o Terminal e cole EXATAMENTE a linha abaixo, tecle Enter e abra o app de novo:
+
+xattr -dr com.apple.quarantine /Applications/CortaTexto.app
+
+3. Na primeira abertura aparece a tela "Preparar o CortaTexto". Clique em "Instalar agora" e aguarde — o app baixa a IA sozinho (~5 GB, pode levar alguns minutos). Quando terminar, é só usar. Nas próximas vezes abre direto.
+
+COMO USAR
+Cole seu texto, escreva o limite em "Reduza para", clique em Resumir (ou Enter) e depois em "Copiar resultado". Em dúvida, clique em "Como funciona".
+
+Depois de instalado o CortaTexto funciona offline. Bom uso!
+
+Criado por Tony de Marco com o Claude Code. Junho, 2026.
