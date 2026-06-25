@@ -787,7 +787,50 @@ def test_modelo_instalado_e_no_ar_offline(monkeypatch):
 
 def test_ollama_binario_fallback_para_path(monkeypatch):
     monkeypatch.setattr(ct, "OLLAMA_APP_DIRS", ())      # nenhuma Ollama.app
+    monkeypatch.setattr(ct.os.path, "exists", lambda p: False)  # nenhum caminho fixo
     monkeypatch.setattr(ct.shutil, "which", lambda n: "/usr/local/bin/ollama")
     assert ct._ollama_binario() == "/usr/local/bin/ollama"
     monkeypatch.setattr(ct.shutil, "which", lambda n: None)
     assert ct._ollama_binario() is None
+
+
+def test_ollama_binario_acha_homebrew_sem_path(monkeypatch):
+    # app de GUI nao herda o PATH -> which() falha; mesmo assim acha o binario
+    # do Homebrew pelo caminho fixo (foi o bug do "sempre pede pra instalar").
+    monkeypatch.setattr(ct, "OLLAMA_APP_DIRS", ())
+    monkeypatch.setattr(ct.os.path, "exists",
+                        lambda p: p == "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(ct.shutil, "which", lambda n: None)   # sem PATH
+    assert ct._ollama_binario() == "/opt/homebrew/bin/ollama"
+
+
+# --------------------------------------------------------------------------
+# Corte SUTIL: spans finos + aparo fiel (deterministico, sem LLM)
+# --------------------------------------------------------------------------
+def test_e_subsequencia():
+    o = "O rato roeu a roupa do rei."
+    assert ct._e_subsequencia("O rato roeu a roupa.", o)       # so deletou
+    assert ct._e_subsequencia("rato roeu roupa rei", o)         # deletou (ordem mantida)
+    assert not ct._e_subsequencia("O rei roeu a roupa.", o)     # reordenou
+    assert not ct._e_subsequencia("O gato roeu a roupa.", o)    # palavra nova
+
+
+def test_spans_finos_marcador_e_em_torno():
+    txt = "Tecnicamente, é uma orquestração em torno do tema."
+    finos = [txt[a:b] for a, b in ct._spans_finos(txt)]
+    assert any(s.strip().lower().startswith("tecnicamente") for s in finos)
+    assert any("em torno" in s for s in finos)
+
+
+def test_aparar_fiel_corte_sutil_encosta_e_preserva_nomes():
+    txt = ("O CortaTexto encurta um texto para o tamanho que você quiser. Usa "
+           "Inteligência Artificial mas nenhuma informação sai do computador. "
+           "Tecnicamente, é uma orquestração em torno do LLM qwen3 rodando "
+           "localmente, via Ollama: um prompt de sistema com regras de edição, "
+           "somado a guardrails em Python que contam os caracteres e garantem que "
+           "o resultado nunca ultrapasse o limite.")
+    out = ct._aparar_para_caber(txt, 350, 80, fiel=True)
+    assert out is not None and ct.contar(out) <= 350
+    assert ct.contar(out) >= 335                 # encosta no limite (antes ~315)
+    assert ct._e_subsequencia(out, txt)          # delecao pura (fiel)
+    assert "Ollama" in out and "Python" in out   # nomes proprios preservados

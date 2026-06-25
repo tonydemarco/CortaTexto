@@ -321,6 +321,61 @@ def _ocupa(i: int, j: int, usados: List[tuple]) -> bool:
     return any(i < y and x < j for (x, y) in usados)
 
 
+def _e_subsequencia(curta: str, original: str) -> bool:
+    """True se `curta` e o `original` APENAS com palavras apagadas (mesma ordem,
+    nada reescrito) -- compara por palavra, ignorando caixa/pontuacao/espacos.
+    Prova de DELECAO PURA (fidelidade): se falhar, houve reescrita/reordenacao."""
+    pal = lambda s: re.findall(r"\w+", s.lower())
+    o, c = pal(original), pal(curta)
+    i = 0
+    for w in c:
+        while i < len(o) and o[i] != w:
+            i += 1
+        if i >= len(o):
+            return False
+        i += 1
+    return True
+
+
+# Marcadores de DISCURSO (abertura/transicao) dispensaveis: removiveis SEM mudar
+# o sentido quando isolados por virgula. Lista FECHADA (seguro estender).
+_DISCURSO = (
+    "tecnicamente", "basicamente", "essencialmente", "na verdade", "de fato",
+    "em resumo", "em suma", "por fim", "alem disso", "além disso", "inclusive",
+    "ou seja", "no entanto", "em geral", "alias", "aliás", "portanto",
+    "na pratica", "na prática",
+)
+
+
+def _spans_finos(texto: str) -> List[tuple]:
+    """Trechos FINOS (poucos caracteres), gramaticalmente SEGUROS de apagar, para
+    o subset-sum encostar no limite em cortes SUTIS. So delecao pura; categorias
+    CURADAS (NAO inclui pron-redundante/artigo/coordenada, que distorcem mesmo
+    sendo subsequencia)."""
+    spans: List[tuple] = []
+    baixo = texto.lower()
+    # (a) marcador de discurso ABRINDO frase, seguido de virgula -> "Marcador, "
+    for m in re.finditer(r"(?:^|[.!?…]\s+)([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ ]*?),\s+", texto):
+        if m.group(1).strip().lower() in _DISCURSO:
+            spans.append((m.start(1), m.end()))
+    # (b) marcador de discurso ENTRE virgulas -> ", marcador"
+    for loc in _DISCURSO:
+        for m in re.finditer(r",\s+" + re.escape(loc) + r"(?=,)", baixo):
+            spans.append(m.span())
+    # (c) "em torno" redundante, PRESERVANDO o artigo seguinte (do/da/dos/das)
+    for m in re.finditer(r"\s+em torno(?=\s+d[oae]s?\b)", baixo):
+        spans.append(m.span())
+    # (d) "voce" antes de verbo de desejo -> "que quiser"
+    for m in re.finditer(r"\s+voc[eê](?=\s+(?:quiser|quiseres|desejar|precisar|gostar))",
+                         baixo):
+        spans.append(m.span())
+    # (e) artigo no INICIO do texto antes de NOME PROPRIO: "O CortaTexto"->"CortaTexto"
+    m = re.match(r"(?:O|A|Os|As|Um|Uma)\s+(?=[A-ZÀ-Ý])", texto)
+    if m:
+        spans.append(m.span())
+    return spans
+
+
 def _spans_heuristicos(texto: str) -> List[tuple]:
     """Fallback deterministico (sem LLM): aponta trechos acessorios em nivel de
     CLAUSULA -- apartes entre parenteses/colchetes/travessoes, oracoes entre
@@ -335,6 +390,10 @@ def _spans_heuristicos(texto: str) -> List[tuple]:
             usados.append((i, j))
             spans.append((i, j))
 
+    # 0) trechos FINOS seguros (marcador de abertura, "em torno", "voce"...) -- PRIMEIRO,
+    # para a granularidade fina vencer a grossa na sobreposicao (subset-sum encosta mais).
+    for i, j in _spans_finos(texto):
+        add(i, j)
     # 1) apartes entre parenteses/colchetes/travessoes (sempre dispensaveis)
     for m in re.finditer(r"\s*\([^)]*\)|\s*\[[^\]]*\]|\s+—[^—]*—", texto):
         add(*m.span())
@@ -460,21 +519,39 @@ def _limites_abertura_fecho(texto: str) -> tuple:
     return (sent[0].end(), sent[-1].start())
 
 
-def _aparar_para_caber(texto: str, limite: int, faixa: int) -> Optional[str]:
+def _aparar_para_caber(texto: str, limite: int, faixa: int,
+                       fiel: bool = False) -> Optional[str]:
     """Apara `texto` para caber em `limite` removendo o MINIMO de trechos
     acessorios (heuristica pura, SEM LLM), o mais perto possivel do topo, sem
-    decapitar a 1a frase nem cortar o fecho. Usado para aparar o excesso da
-    micro-edição do LLM (que costuma ficar um pouco acima do limite). Devolve o
-    texto aparado (sempre <= limite) ou None se nao der para caber so removendo
-    acessorios (ai o corte de seguranca de `finalizar` assume)."""
+    decapitar a 1a frase nem cortar o fecho. Devolve o texto aparado (sempre <=
+    limite) ou None se nao der para caber so removendo acessorios.
+    Com `fiel=True` (caminho frase-a-frase): NUNCA remove trecho com NOME PROPRIO
+    ou NUMERO e so aceita candidato que seja DELECAO PURA (subsequencia) -- assim
+    o corte SUTIL encosta no limite sem distorcer. Sem `fiel` (caminho gerativo,
+    `_encolher_limpo`) mantem o comportamento antigo."""
     excesso = len(texto) - limite
     if excesso <= 0:
         return texto                                # ja cabe
     spans = _spans_heuristicos(texto)
+    if fiel:
+        # GUARDRAIL: nunca remover trecho com NOME PROPRIO ou NUMERO (ex.: impede
+        # apagar ', via Ollama'); so sobra o que e' realmente acessorio.
+        nomes = _nomes_proprios(texto)
+        def _seguro(i: int, j: int) -> bool:
+            trecho = texto[i:j]
+            if any(ch.isdigit() for ch in trecho):
+                return False
+            return not any(nome in trecho for nome in nomes)
+        spans = [(a, b) for (a, b) in spans if _seguro(a, b)]
     # QUALIDADE: nao decapitar a abertura nem cortar o fecho. Apara do corpo; so
-    # mexe na 1a/ultima frase se nao houver material suficiente no meio.
+    # mexe na 1a/ultima frase se nao houver material suficiente no meio. EXCECAO:
+    # os trechos FINOS (marcador de abertura, "em torno", artigo inicial...) sao
+    # seguros mesmo na 1a/ultima frase (nao decapitam) -> nao os excluir, senao
+    # um corte sutil e' forcado a remover uma clausula grande do meio.
     fim_1a, ini_ult = _limites_abertura_fecho(texto)
-    corpo = [(a, b) for (a, b) in spans if a >= fim_1a and b <= ini_ult]
+    exemptos = set(_spans_finos(texto)) if fiel else set()
+    corpo = [(a, b) for (a, b) in spans
+             if (a >= fim_1a and b <= ini_ult) or (a, b) in exemptos]
     if sum(b - a for a, b in corpo) >= excesso:
         spans = corpo
     spans = spans[:80]                              # limita o custo do subset-sum
@@ -495,6 +572,9 @@ def _aparar_para_caber(texto: str, limite: int, faixa: int) -> Optional[str]:
         ranges = [spans[i] for i in alcancavel[s]]
         cand = _remover_e_costurar(texto, ranges)
         L = len(cand)
+        # no modo fiel, so aceita DELECAO PURA (subsequencia) -- nunca distorce.
+        if fiel and not _e_subsequencia(cand, texto):
+            continue
         if 0 < L <= limite and (melhor_cand is None or L > len(melhor_cand)):
             melhor_cand = cand                      # o maior que CABE (mais no topo)
     return melhor_cand
@@ -675,17 +755,29 @@ def _montar_frases(originais: List[str], curtas: List[str], limite: int,
     if contar(full) <= limite:
         return full                               # (1) cabe sem encurtar nada
 
-    # (2) encurtar o MINIMO de frases: economia de cada uma ao trocar orig->curta
+    # (2) encurtar o MINIMO de frases. Duas opcoes FIEIS, fica-se com a que
+    # encosta MAIS no limite (importante em corte SUTIL: o modelo as vezes
+    # comprime uma frase demais e o resultado despenca; o aparo de clausula da
+    # uma opcao mais fina):
+    #   (2a) subset-sum nas ECONOMIAS: encurta o menor conjunto de frases >= excesso;
+    #   (2b) APARO de clausulas acessorias do original (`_aparar_para_caber`).
     economia = [contar(originais[i]) - contar(curtas[i]) for i in range(n)]
     excesso = contar(full) - limite
+    candidatos = []
     idx_red = [i for i in range(n) if economia[i] > 0]
     if idx_red:
         comps = [economia[i] for i in idx_red]
         mapa = _mapa_subconjuntos(comps)
         viaveis = sorted(s for s in mapa if s >= excesso)
-        if viaveis:                               # da pra caber so encurtando
+        if viaveis:
             encurtar = {idx_red[k] for k in mapa[viaveis[0]]}
-            return juntar(todas, lambda i: curtas[i] if i in encurtar else originais[i])
+            candidatos.append(juntar(
+                todas, lambda i: curtas[i] if i in encurtar else originais[i]))
+    aparado = _aparar_para_caber(full, limite, max(20, limite // 4), fiel=True)
+    if aparado and 0 < contar(aparado) <= limite:
+        candidatos.append(aparado)
+    if candidatos:
+        return max(candidatos, key=contar)        # o mais perto do limite (por baixo)
 
     # (3) nem encurtando tudo cabe -> elimina frases INTEIRAS (usa as encurtadas)
     curta = lambda i: curtas[i]
@@ -2062,6 +2154,11 @@ def _ollama_binario() -> Optional[str]:
         b = os.path.join(os.path.expanduser(d), "Contents", "Resources", "ollama")
         if os.path.exists(b):
             return b
+    # apps de GUI (abertos pelo Finder) NAO herdam o PATH do shell -> checa os
+    # caminhos comuns do Homebrew/manual explicitamente, alem do `which`.
+    for p in ("/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"):
+        if os.path.exists(p):
+            return p
     return shutil.which("ollama")
 
 
@@ -2593,11 +2690,13 @@ class App(tk.Tk):
         fila: queue.Queue = queue.Queue()
 
         def checar():
-            binario = _ollama_binario()
-            if binario and not _ollama_no_ar():        # instalado, mas parado
-                _iniciar_ollama(binario)
+            if not _ollama_no_ar():                    # servidor parado -> tenta subir
+                _iniciar_ollama(_ollama_binario())
                 _esperar_ollama(15)
-            fila.put(bool(binario) and _ollama_no_ar() and _modelo_instalado())
+            # PRONTO = servidor no ar E modelo baixado. NAO exige achar o binario:
+            # app de GUI nao herda o PATH, mas se a API responde e o modelo existe,
+            # o app ja funciona (resumir fala direto com a porta 11434).
+            fila.put(_ollama_no_ar() and _modelo_instalado())
 
         threading.Thread(target=checar, daemon=True).start()
 
