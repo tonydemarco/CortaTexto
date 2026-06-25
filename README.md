@@ -55,6 +55,10 @@ A interface usa exclusivamente a fonte **Garoa Light**, **embutida** no próprio
 **sem instalar nada no sistema**. Se o registro falhar, o app abre com a fonte
 padrão e mostra um aviso discreto.
 
+A Garoa Light é da **Just in Type** e está licenciada sob a **SIL Open Font
+License 1.1** (ver [`OFL.txt`](OFL.txt)), com nome reservado "Garoa Light" — pode
+ser embutida e redistribuída livremente junto com o software.
+
 ## Testes
 
 Os testes não chamam o Ollama real (usam um `chamar_llm` mockado e respostas
@@ -77,3 +81,12 @@ Constantes no topo de `CortaTexto.py` (fáceis de trocar): `MODELO_OLLAMA`
 (`qwen3`), `OLLAMA_URL` (`http://localhost:11434/api/chat`),
 `MAX_TOKENS_MIN`/`MAX_TOKENS_TETO`, `TEMPERATURA`, `TIMEOUT_API`, tolerâncias e
 tentativas padrão.
+
+## Licença
+
+- **Código**: [MIT](LICENSE) — © 2026 Tony de Marco.
+- **Fonte Garoa Light**: [SIL Open Font License 1.1](OFL.txt) — © 2026 Tony de
+  Marco (Just in Type), nome reservado "Garoa Light".
+
+As dependências de runtime (não incluídas no repositório) têm licenças próprias:
+**Ollama** (MIT) e o modelo **qwen3** (Apache 2.0).
