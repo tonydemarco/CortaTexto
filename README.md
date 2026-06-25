@@ -1,52 +1,71 @@
 # CortaTexto
 
-App desktop (Tkinter) para **macOS** que resume um texto usando um modelo de IA
-**local** (via **Ollama**), **sem ultrapassar um limite de caracteres** definido
-por você — e **sem chave de API**, rodando 100% na sua máquina.
+App desktop (Tkinter) para **macOS** que encurta um texto até um **limite de
+caracteres** definido por você, usando um modelo de IA **local** (via **Ollama**)
+— **sem chave de API** e, depois da primeira vez, **100% offline**.
 
 O modelo não conta caracteres com precisão, então **quem conta é o Python**
-(`len()` puro é a fonte de verdade). Quando o resumo não cabe, o app pede
-correções ao modelo num loop, com **tolerância progressiva** em duas rodadas, até
-o texto caber na faixa aceitável. **O resultado nunca passa do limite.**
+(`len()`, ignorando quebras de linha, é a fonte de verdade). **O resultado nunca
+passa do limite** e fica o mais próximo possível dele.
 
-## Requisitos
+## Baixar (para usar)
 
-- **macOS** com Python 3 (o Tkinter já vem no Python oficial do macOS).
-- **Ollama** instalado e rodando: https://ollama.com (ou `brew install ollama`).
-- Um **modelo** baixado, por exemplo: `ollama pull qwen3`.
+Para a maioria das pessoas, é só baixar o app pronto:
 
-Não há dependências Python de runtime — a chamada ao Ollama usa só a biblioteca
-padrão (`urllib`).
+➡️ **[Releases](https://github.com/tonydemarco/CortaTexto/releases)** — baixe o
+`.zip`, descompacte e leia o `LEIA-ME PRIMEIRO.txt` que vem junto.
 
-## Uso
+- **Requisito:** Mac com **chip Apple** (M1 ou mais novo). *Não roda em Macs Intel.*
+- Como o app não é assinado pela Apple, na **primeira vez** abra com
+  **clique-direito (ou Control+clique) → Abrir → Abrir**.
+- No **primeiro uso**, o app baixa sozinho o motor de IA (Ollama ~178 MB +
+  modelo qwen3 ~5,2 GB). É uma vez só; depois funciona sem internet.
+
+## Como usar
+
+1. Cole o texto a encurtar (um contador mostra o tamanho original).
+2. Em **"Reduza para"**, informe o limite em caracteres.
+3. Clique **Resumir** (ou `Ctrl/Cmd+Enter`). Dá para **Cancelar** a qualquer
+   momento (`Esc`) — o melhor resumo parcial que já cabe é preservado.
+4. O resultado é **editável**, com recontagem ao vivo. Use **Copiar resultado**
+   quando estiver pronto.
+5. O botão **Como funciona** abre uma explicação curta dentro do app.
+
+A interface expõe **apenas o limite** — os demais parâmetros (tolerância,
+tentativas, modelo) são constantes no código (ver [Configuração](#configuração)).
+As quebras de linha (Enter) **não contam** para o limite. Se o texto original já
+couber no limite, ele é devolvido sem alterações.
+
+## Como o tamanho é garantido
+
+O Python é dono da contagem; o LLM só escreve. O roteamento depende de quão
+grande é o corte (`r = (original − limite) / original`):
+
+- **Cortes até ~50%** → modo **frase a frase**: cada frase é encurtada
+  isoladamente (nunca funde frases nem inventa dados) e o app monta
+  deterministicamente o conjunto que mais se aproxima do limite. Resultado
+  **fiel** ao original.
+- **Cortes maiores que 50%** → **resumo livre**: o modelo reescreve com palavras
+  próprias, mantendo a ordem dos assuntos, num laço com tolerância progressiva
+  até caber.
+
+Em todos os casos, um aparo final em fronteira de palavra garante que o
+resultado **não ultrapasse o limite** (sem reticências).
+
+## Rodar do código-fonte (desenvolvedores)
 
 ```bash
-# 1. deixe o Ollama rodando e baixe um modelo (uma vez):
-ollama pull qwen3
+# 1. deixe o Ollama rodando e baixe o modelo (uma vez):
+ollama pull qwen3        # https://ollama.com  (ou: brew install ollama)
 
 # 2. abra o app:
 python3 CortaTexto.py
 ```
 
-Na janela:
-
-1. Cole o texto a resumir (há um contador do tamanho original).
-2. Defina **Limite (caracteres)**, **Tolerância 1** (rodada 1), **Tolerância 2**
-   (rodada 2) e **Máx. tentativas**.
-3. Em **Modelo (Ollama)**, informe o modelo que você baixou (padrão: `qwen3`).
-4. Clique **Resumir** (ou `Ctrl/Cmd+Enter`). Você pode **Cancelar** a qualquer
-   momento (`Esc`) — o melhor resumo parcial que já cabe é preservado.
-5. O resultado é **editável** com recontagem ao vivo; o contador fica vermelho
-   se você ultrapassar o limite. Use **Copiar resultado** quando estiver pronto.
-
-### Faixa de aceitação
-
-A faixa aceita é `[limite − tolerância, limite]`. A rodada 1 usa a Tolerância 1;
-se não convergir, a rodada 2 relaxa para a Tolerância 2. Ficar um pouco abaixo
-do limite (dentro da tolerância) é desejável — evita pedir correções eternas só
-para bater o número exato.
-
-Se o texto **original já couber no limite**, ele é devolvido sem alterações.
+Não há dependências Python de runtime — a chamada ao Ollama usa só a biblioteca
+padrão (`urllib`). O Tkinter já vem no Python oficial do macOS. *(Se o Ollama ou
+o modelo não estiverem presentes, o próprio app oferece baixá-los na primeira
+abertura.)*
 
 ## Fonte
 
@@ -61,26 +80,27 @@ ser embutida e redistribuída livremente junto com o software.
 
 ## Testes
 
-Os testes não chamam o Ollama real (usam um `chamar_llm` mockado e respostas
-de exemplo) e não exigem nada além do Python:
+Os testes não chamam o Ollama real (usam um `chamar_llm` mockado e respostas de
+exemplo) e não exigem nada além do Python:
 
 ```bash
 pip install -r requirements-dev.txt   # pytest
 pytest -q
 ```
 
-Cobrem: contagem com acentos/espaços, aceitação imediata quando já cabe, loop de
-encurtamento, expansão quando curto demais, corte de segurança, resposta
-vazia/`None` falhando, validação de tolerância negativa, cancelamento
-preservando o melhor parcial, e o parsing da resposta do Ollama (remoção de
-`<think>…</think>`, truncamento, resposta vazia).
+Cobrem, entre outros: contagem com acentos/espaços e ignorando quebras de linha,
+aceitação imediata quando já cabe, o modo frase a frase (encurtamento fiel,
+preservação de parágrafos, cortes sutis determinísticos), o resumo livre (ordem
+preservada, remoção de números inventados, nunca usar reticências), corte de
+segurança, cancelamento preservando o melhor parcial, e o parsing da resposta do
+Ollama (remoção de `<think>…</think>`, truncamento, resposta vazia).
 
 ## Configuração
 
-Constantes no topo de `CortaTexto.py` (fáceis de trocar): `MODELO_OLLAMA`
-(`qwen3`), `OLLAMA_URL` (`http://localhost:11434/api/chat`),
-`MAX_TOKENS_MIN`/`MAX_TOKENS_TETO`, `TEMPERATURA`, `TIMEOUT_API`, tolerâncias e
-tentativas padrão.
+Constantes no topo de `CortaTexto.py` (fáceis de trocar, **só no código** — não
+aparecem na interface): `MODELO_OLLAMA` (`qwen3`), `OLLAMA_URL`,
+`TOLERANCIA_RODADA_1` (6) / `TOLERANCIA_RODADA_2` (20), `MAX_TENTATIVAS_PADRAO`
+(6), `LIMIAR_FRASE_A_FRASE` (0.50), além de temperatura e timeout.
 
 ## Licença
 
